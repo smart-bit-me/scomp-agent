@@ -25,7 +25,9 @@ type SessionInfo struct {
 // AgentMsg is a message sent from the scomp agent to scomp-server.
 //
 // type values:
-//   - "hello"          — initial handshake (uid, version, hostname)
+//   - "hello"          — initial handshake (uid, version, hostname, pub_key)
+//   - "auth"           — challenge response (sig): Ed25519 signature over the
+//     server's nonce, proving possession of the agent's private key (F3)
 //   - "session_add"    — new PTY session available (info)
 //   - "session_remove" — session ended (session_id)
 //   - "output"         — PTY bytes for a session (session_id, data base64)
@@ -37,6 +39,8 @@ type AgentMsg struct {
 	UID       string       `json:"uid,omitempty"`
 	Version   string       `json:"version,omitempty"`
 	Hostname  string       `json:"hostname,omitempty"`
+	PubKey    string       `json:"pub_key,omitempty"` // hex Ed25519 public key (hello)
+	Sig       string       `json:"sig,omitempty"`     // hex Ed25519 signature over the nonce (auth)
 	SessionID string       `json:"session_id,omitempty"`
 	ClientID  string       `json:"client_id,omitempty"`
 	Data      string       `json:"data,omitempty"` // base64-encoded bytes
@@ -48,6 +52,8 @@ type AgentMsg struct {
 // ServerMsg is a message sent from scomp-server to the scomp agent.
 //
 // type values:
+//   - "challenge"      — proof-of-possession challenge: sign nonce with the agent
+//     private key and reply with an "auth" AgentMsg (F3)
 //   - "input"          — keyboard bytes for a session (session_id, data base64)
 //   - "resize"         — terminal resize (session_id, cols, rows)
 //   - "client_attach"  — browser just connected to session (session_id, client_id)
@@ -62,4 +68,5 @@ type ServerMsg struct {
 	Cols      uint16 `json:"cols,omitempty"`
 	Rows      uint16 `json:"rows,omitempty"`
 	PairID    string `json:"pair_id,omitempty"`
+	Nonce     string `json:"nonce,omitempty"` // hex challenge nonce
 }

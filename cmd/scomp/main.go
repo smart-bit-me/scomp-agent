@@ -6,6 +6,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
@@ -67,6 +68,10 @@ func main() {
 	if err != nil {
 		log.Fatalf("uid: %v", err)
 	}
+	key, err := auth.LoadOrCreateKey(configDir)
+	if err != nil {
+		log.Fatalf("key: %v", err)
+	}
 
 	var defaultMode sessions.SessionMode
 	switch *modeFlag {
@@ -122,7 +127,7 @@ func main() {
 
 	for {
 		lazy := discoverSessions(reg, defaultMode, onTmuxActivated)
-		if err := runAgent(*serverURL, uid, reg, lazy, newSess); err != nil {
+		if err := runAgent(*serverURL, uid, key, reg, lazy, newSess); err != nil {
 			log.Printf("server disconnected (%v), retrying in 5s…", err)
 		}
 		time.Sleep(5 * time.Second)
@@ -343,7 +348,35 @@ func serverBaseURL(wsURL string) string {
 	return strings.TrimRight(u.String(), "/")
 }
 
-func runAgent(serverURL, uid string, reg *sessions.Registry, lazy []lazySession, newSess <-chan lazySession) error {
+// answerChallenge reads the server's "challenge" message, signs its nonce with
+// the agent's private key, and replies with an "auth" message. The read is
+// deadline-bounded so a silent relay cannot wedge the connect.
+func answerChallenge(conn *websocket.Conn, key ed25519.PrivateKey) error {
+	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	defer conn.SetReadDeadline(time.Time{})
+	_, raw, err := conn.ReadMessage()
+	if err != nil {
+		return err
+	}
+	var msg protocol.ServerMsg
+	if err := json.Unmarshal(raw, &msg); err != nil {
+		return err
+	}
+	if msg.Type != "challenge" || msg.Nonce == "" {
+		return fmt.Errorf("expected challenge, got %q", msg.Type)
+	}
+	nonce, err := hex.DecodeString(msg.Nonce)
+	if err != nil {
+		return fmt.Errorf("bad challenge nonce: %w", err)
+	}
+	resp, _ := json.Marshal(protocol.AgentMsg{
+		Type: "auth",
+		Sig:  hex.EncodeToString(ed25519.Sign(key, nonce)),
+	})
+	return conn.WriteMessage(websocket.TextMessage, resp)
+}
+
+func runAgent(serverURL, uid string, key ed25519.PrivateKey, reg *sessions.Registry, lazy []lazySession, newSess <-chan lazySession) error {
 	conn, _, err := websocket.DefaultDialer.Dial(serverURL, nil)
 	if err != nil {
 		return err
@@ -359,8 +392,16 @@ func runAgent(serverURL, uid string, reg *sessions.Registry, lazy []lazySession,
 		UID:      uid,
 		Version:  "1.0",
 		Hostname: hostname,
+		PubKey:   auth.PublicKeyHex(key),
 	})
 	if err := conn.WriteMessage(websocket.TextMessage, hello); err != nil {
+		return err
+	}
+
+	// Proof-of-possession: the server replies with a challenge nonce we must sign
+	// with our private key (F3). This runs before the main loop so a rogue agent
+	// that only knows the uid cannot get past the handshake.
+	if err := answerChallenge(conn, key); err != nil {
 		return err
 	}
 
