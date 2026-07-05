@@ -4,6 +4,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"crypto/rand"
 	"encoding/base64"
@@ -19,6 +20,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -550,7 +552,44 @@ func handleServerMsg(
 			ClientID:  msg.ClientID,
 			Data:      base64.StdEncoding.EncodeToString(snap),
 		})
+
+	case "pair_request":
+		// A signed-in browser asked to link this host. Prompt on the terminal;
+		// the user must type the PIN shown in their browser. This proves TTY
+		// access to the host, not just knowledge of the uid (F1). Runs in a
+		// goroutine so the blocking stdin read does not stall the read loop.
+		go promptPairPIN(msg.PairID, send)
 	}
+}
+
+// pairInProgress ensures only one terminal PIN prompt is active at a time, even
+// if the server (or a rogue relay) sends overlapping pair_request messages.
+var pairInProgress atomic.Bool
+
+// promptPairPIN prints a pairing prompt on the agent's terminal, reads one line
+// from stdin, and replies with pair_submit carrying the typed PIN. When stdin is
+// not a terminal (agent backgrounded / piped) the read returns EOF with no data
+// and pairing is aborted — pairing requires running scomp in the foreground.
+func promptPairPIN(pairID string, send func(protocol.AgentMsg)) {
+	if !pairInProgress.CompareAndSwap(false, true) {
+		return
+	}
+	defer pairInProgress.Store(false)
+
+	fmt.Print("\n[scomp] Pairing requested from a browser.\n" +
+		"        Enter the PIN shown there to link this machine: ")
+	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+	pin := strings.TrimSpace(line)
+	if pin == "" {
+		if err != nil {
+			fmt.Println("\n[scomp] pairing aborted (stdin not a terminal — run scomp in the foreground).")
+		} else {
+			fmt.Println("[scomp] pairing aborted (empty PIN).")
+		}
+		return
+	}
+	send(protocol.AgentMsg{Type: "pair_submit", PairID: pairID, PIN: pin})
+	fmt.Println("[scomp] PIN submitted — check your browser.")
 }
 
 func newSessionID() string {
