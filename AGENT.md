@@ -28,12 +28,12 @@ Always run `gofmt -w` on touched files and `make test` before committing.
 
 | Path | Role |
 |---|---|
-| `cmd/scomp/` | entrypoint; `--server`, `--version` flags; startup banner |
+| `cmd/scomp/` | entrypoint; server/mode/QR/version flags; pairing prompt |
 | `protocol/` | wire types SHARED with scomp-server (`AgentMsg`, `ServerMsg`, `SessionInfo`) |
 | `internal/pty/` | PTY session, 1 MiB ring buffer, DECCKM tracking |
 | `internal/sessions/` | session registry, dedup by source key |
 | `internal/tmuxsess/` `internal/screensess/` | tmux / screen discovery |
-| `internal/auth/uid.go` | persistent UID at `~/.config/scomp/uid` |
+| `internal/auth/` | persistent UID + Ed25519 key under `~/.config/scomp/` |
 
 ## Gotchas
 
@@ -45,6 +45,13 @@ Always run `gofmt -w` on touched files and `make test` before committing.
 - **Version injection**: the binary version comes from
   `-ldflags "-X main.version=$(git describe --tags --always --dirty)"`. `go run`
   without the ldflag reports `dev`.
+- **Identity files are compatibility-sensitive.** The UID and Ed25519 seed are
+  both mode `0600`; changing their format needs a migration path. The server
+  pins the public key on first use.
+- **Pairing reads stdin.** `pair_request` handling prompts in the foreground;
+  background/non-interactive agents cannot complete initial account pairing.
+- **Session modes are enforced agent-side.** The relay is not trusted to enforce
+  `readonly` or `approved-only`; keep input checks in `handleServerMsg`.
 
 ## Release
 
