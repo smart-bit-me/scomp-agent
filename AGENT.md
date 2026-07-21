@@ -29,6 +29,7 @@ Always run `gofmt -w` on touched files and `make test` before committing.
 | Path | Role |
 |---|---|
 | `cmd/scomp/` | entrypoint; server/mode/QR/version flags; pairing prompt |
+| `cmd/scomp/session_*` | stable multiplexer catalog, fsnotify, tmux control-mode events |
 | `protocol/` | wire types SHARED with scomp-server (`AgentMsg`, `ServerMsg`, `SessionInfo`) |
 | `internal/pty/` | PTY session, 1 MiB ring buffer, DECCKM tracking |
 | `internal/sessions/` | session registry, dedup by source key |
@@ -52,6 +53,9 @@ Always run `gofmt -w` on touched files and `make test` before committing.
   background/non-interactive agents cannot complete initial account pairing.
 - **Session modes are enforced agent-side.** The relay is not trusted to enforce
   `readonly` or `approved-only`; keep input checks in `handleServerMsg`.
+- **Session discovery is event-driven.** GNU screen uses socket filesystem
+  events; tmux uses a read-only `ignore-size` control client. Do not replace
+  either with a periodic scan timer.
 
 ## Release
 

@@ -26,8 +26,11 @@ make run            # go run ./cmd/scomp
 ```
 
 By default the agent connects to `wss://link.scomp.me/agent`, discovers existing
-tmux and screen sessions, prints a mobile link/QR code, and watches for new
-session sockets. PTYs are attached lazily when a client first opens them.
+tmux and screen sessions, prints a mobile link/QR code, and reacts to session
+creation and removal. GNU screen changes arrive through socket filesystem
+events; tmux changes arrive through a read-only, size-ignoring control-mode
+client. There is no session polling timer. PTYs are attached lazily when a
+client first opens them.
 
 Useful flags:
 

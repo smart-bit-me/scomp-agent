@@ -25,14 +25,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/fsnotify/fsnotify"
 	"github.com/gorilla/websocket"
 	qrcode "github.com/skip2/go-qrcode"
 
 	"github.com/smart-bit-me/scomp-agent/internal/auth"
-	"github.com/smart-bit-me/scomp-agent/internal/screensess"
 	"github.com/smart-bit-me/scomp-agent/internal/sessions"
-	"github.com/smart-bit-me/scomp-agent/internal/tmuxsess"
 	"github.com/smart-bit-me/scomp-agent/protocol"
 )
 
@@ -120,182 +117,16 @@ func main() {
 	mobileURL := serverBaseURL(*serverURL) + "/?uid=" + uid
 	printBanner(uid, *serverURL, mobileURL, *noQR)
 
-	newSess := make(chan lazySession, 16)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go watchSessions(ctx, reg, defaultMode, onTmuxActivated, newSess)
+	catalog := newSessionCatalog(reg, defaultMode, onTmuxActivated)
+	go watchSessions(ctx, catalog)
 
 	for {
-		lazy := discoverSessions(reg, defaultMode, onTmuxActivated)
-		if err := runAgent(*serverURL, uid, key, reg, lazy, newSess); err != nil {
+		if err := runAgent(*serverURL, uid, key, reg, catalog); err != nil {
 			log.Printf("server disconnected (%v), retrying in 5s…", err)
 		}
 		time.Sleep(5 * time.Second)
-	}
-}
-
-// discoverSessions builds lazy descriptors for detected tmux and screen sessions.
-// onTmuxActivated is called with the tmux session name when a linked session is created.
-func discoverSessions(reg *sessions.Registry, mode sessions.SessionMode, onTmuxActivated func(string)) (lazy []lazySession) {
-	for _, s := range tmuxsess.List() {
-		id := newSessionID()
-		name := s.Name
-		lazy = append(lazy, lazySession{
-			id:      id,
-			cmd:     "tmux:" + name,
-			created: time.Now(),
-			mode:    mode,
-			activate: func(cols, rows uint16) error {
-				cmd, args := tmuxsess.LinkedSessionArgs(name)
-				_, _, err := reg.CreateWithID(id, cmd, args, cols, rows)
-				if err == nil {
-					onTmuxActivated(name)
-				}
-				return err
-			},
-		})
-		log.Printf("discovered tmux: %s (attaches on first browser connect)", name)
-	}
-
-	for _, s := range screensess.List() {
-		id := newSessionID()
-		fullName := s.FullName
-		shortName := s.Name
-		lazy = append(lazy, lazySession{
-			id:      id,
-			cmd:     "screen:" + shortName,
-			created: time.Now(),
-			mode:    mode,
-			activate: func(cols, rows uint16) error {
-				cmd, args := screensess.AttachArgs(fullName)
-				_, _, err := reg.CreateWithID(id, cmd, args, cols, rows)
-				return err
-			},
-		})
-		log.Printf("discovered screen: %s (attaches on first browser connect)", shortName)
-	}
-
-	if len(lazy) == 0 {
-		log.Printf("no tmux or screen sessions found — start one and the agent will detect it automatically")
-	}
-	return
-}
-
-// watchSessions watches tmux and screen socket directories for new sessions using
-// filesystem events (inotify on Linux). New sessions are sent on newSess without polling.
-//
-// Limitation: detects a new tmux *server* (socket file creation) but not new sessions
-// within an already-running tmux server — those all share one socket file.
-func watchSessions(
-	ctx context.Context,
-	reg *sessions.Registry,
-	mode sessions.SessionMode,
-	onTmuxActivated func(string),
-	newSess chan<- lazySession,
-) {
-	w, err := fsnotify.NewWatcher()
-	if err != nil {
-		log.Printf("sesswatch: %v", err)
-		return
-	}
-	defer w.Close()
-
-	known := make(map[string]bool)
-
-	addDir := func(dir string) {
-		if dir == "" {
-			return
-		}
-		if err := w.Add(dir); err != nil {
-			if !os.IsNotExist(err) {
-				log.Printf("sesswatch: watch %s: %v", dir, err)
-			}
-		}
-	}
-	addDir(tmuxsess.SocketDir())
-	addDir(screensess.SocketDir())
-
-	scan := func() {
-		for _, s := range tmuxsess.List() {
-			key := "tmux:" + s.Name
-			if known[key] {
-				continue
-			}
-			known[key] = true
-			name := s.Name
-			id := newSessionID()
-			ls := lazySession{
-				id:      id,
-				cmd:     key,
-				created: time.Now(),
-				mode:    mode,
-				activate: func(cols, rows uint16) error {
-					cmd, args := tmuxsess.LinkedSessionArgs(name)
-					_, _, err := reg.CreateWithID(id, cmd, args, cols, rows)
-					if err == nil {
-						onTmuxActivated(name)
-					}
-					return err
-				},
-			}
-			log.Printf("sesswatch: new tmux session: %s", name)
-			select {
-			case newSess <- ls:
-			case <-ctx.Done():
-				return
-			}
-		}
-		for _, s := range screensess.List() {
-			key := "screen:" + s.Name
-			if known[key] {
-				continue
-			}
-			known[key] = true
-			fullName := s.FullName
-			shortName := s.Name
-			id := newSessionID()
-			ls := lazySession{
-				id:      id,
-				cmd:     key,
-				created: time.Now(),
-				mode:    mode,
-				activate: func(cols, rows uint16) error {
-					cmd, args := screensess.AttachArgs(fullName)
-					_, _, err := reg.CreateWithID(id, cmd, args, cols, rows)
-					return err
-				},
-			}
-			log.Printf("sesswatch: new screen session: %s", shortName)
-			select {
-			case newSess <- ls:
-			case <-ctx.Done():
-				return
-			}
-		}
-	}
-
-	for {
-		select {
-		case ev, ok := <-w.Events:
-			if !ok {
-				return
-			}
-			if ev.Has(fsnotify.Create) {
-				// If a new directory appeared (e.g. tmux socket dir just created),
-				// watch it so we catch socket files created inside it.
-				if fi, err := os.Stat(ev.Name); err == nil && fi.IsDir() {
-					w.Add(ev.Name)
-				}
-				scan()
-			}
-		case err, ok := <-w.Errors:
-			if !ok {
-				return
-			}
-			log.Printf("sesswatch: %v", err)
-		case <-ctx.Done():
-			return
-		}
 	}
 }
 
@@ -376,7 +207,7 @@ func answerChallenge(conn *websocket.Conn, key ed25519.PrivateKey) error {
 	return conn.WriteMessage(websocket.TextMessage, resp)
 }
 
-func runAgent(serverURL, uid string, key ed25519.PrivateKey, reg *sessions.Registry, lazy []lazySession, newSess <-chan lazySession) error {
+func runAgent(serverURL, uid string, key ed25519.PrivateKey, reg *sessions.Registry, catalog *sessionCatalog) error {
 	conn, _, err := websocket.DefaultDialer.Dial(serverURL, nil)
 	if err != nil {
 		return err
@@ -404,6 +235,8 @@ func runAgent(serverURL, uid string, key ed25519.PrivateKey, reg *sessions.Regis
 	if err := answerChallenge(conn, key); err != nil {
 		return err
 	}
+	lazy, sessionChanges, unsubscribe := catalog.snapshotAndSubscribe()
+	defer unsubscribe()
 
 	sendCh := make(chan []byte, 512)
 	connDone := make(chan struct{})
@@ -482,15 +315,20 @@ func runAgent(serverURL, uid string, key ed25519.PrivateKey, reg *sessions.Regis
 	}
 
 	lazyMap := make(map[string]*lazySession, len(lazy))
-	announced := make(map[string]bool, len(lazy))
 	for i := range lazy {
 		ls := &lazy[i]
-		sendSessionAdd(ls.id, ls.cmd, ls.created, ls.mode, false, 0, 0)
-		lazyMap[ls.id] = ls
-		announced[ls.id] = true
+		if _, active := reg.Get(ls.id); active {
+			modes[ls.id] = ls.mode
+			startForwarder(ls.id)
+			sendSessionAdd(ls.id, ls.cmd, ls.created, ls.mode, true, 0, 0)
+		} else {
+			sendSessionAdd(ls.id, ls.cmd, ls.created, ls.mode, false, 0, 0)
+			lazyMap[ls.id] = ls
+		}
 	}
 
-	// Read incoming server messages in a goroutine so we can also select on newSess.
+	// Read incoming server messages in a goroutine so we can also select on
+	// event-driven multiplexer lifecycle changes.
 	readCh := make(chan protocol.ServerMsg, 64)
 	wg.Add(1)
 	go func() {
@@ -518,13 +356,18 @@ func runAgent(serverURL, uid string, key ed25519.PrivateKey, reg *sessions.Regis
 			}
 			handleServerMsg(msg, reg, modes, lazyMap, send, sendSessionAdd, startForwarder)
 
-		case ls := <-newSess:
-			if announced[ls.id] {
+		case change := <-sessionChanges:
+			if change.removeID != "" {
+				delete(lazyMap, change.removeID)
+				delete(modes, change.removeID)
+				send(protocol.AgentMsg{Type: "session_remove", SessionID: change.removeID})
 				continue
 			}
-			announced[ls.id] = true
-			lsCopy := ls
-			lazyMap[ls.id] = &lsCopy
+			if change.add == nil {
+				continue
+			}
+			ls := *change.add
+			lazyMap[ls.id] = &ls
 			sendSessionAdd(ls.id, ls.cmd, ls.created, ls.mode, false, 0, 0)
 		}
 	}
