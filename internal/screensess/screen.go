@@ -55,6 +55,7 @@ func List() []Session {
 // Exported for testing.
 func parseScreenOutput(out string) []Session {
 	var result []Session
+	seenDisplayNames := make(map[string]struct{})
 	for _, line := range strings.Split(out, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" || !strings.Contains(trimmed, ".") {
@@ -74,6 +75,13 @@ func parseScreenOutput(out string) []Session {
 		if i := strings.Index(fullName, "."); i >= 0 {
 			name = fullName[i+1:]
 		}
+		// Screen can expose more than one PID-prefixed socket for the same display
+		// name. The display name is what the catalog and clients treat as identity;
+		// retain the first socket so its relay session ID remains stable.
+		if _, exists := seenDisplayNames[name]; exists {
+			continue
+		}
+		seenDisplayNames[name] = struct{}{}
 
 		result = append(result, Session{
 			FullName: fullName,

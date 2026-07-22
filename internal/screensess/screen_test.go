@@ -40,6 +40,17 @@ func TestParseScreenOutput_FullName(t *testing.T) {
 	}
 }
 
+func TestParseScreenOutput_DeduplicatesDisplayName(t *testing.T) {
+	out := "\t12345.work\t(Attached)\n\t67890.work\t(Detached)\n"
+	got := parseScreenOutput(out)
+	if len(got) != 1 {
+		t.Fatalf("expected one logical display, got %v", got)
+	}
+	if got[0].FullName != "12345.work" {
+		t.Fatalf("kept FullName %q, want first stable socket", got[0].FullName)
+	}
+}
+
 func TestAttachArgs_NoAFlag(t *testing.T) {
 	_, args := AttachArgs("68764.myname")
 	if len(args) != 2 || args[0] != "-x" || args[1] != "68764.myname" {

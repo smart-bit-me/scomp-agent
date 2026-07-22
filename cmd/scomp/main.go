@@ -235,6 +235,11 @@ func runAgent(serverURL, uid string, key ed25519.PrivateKey, reg *sessions.Regis
 	if err := answerChallenge(conn, key); err != nil {
 		return err
 	}
+	// Reconcile against the actual tmux/Screen sockets after every relay
+	// reconnect. A long-running filesystem watcher can miss an event (for
+	// example after an overflow); without this refresh, a relay restart would
+	// receive that stale catalog until another socket event such as screen -rd.
+	catalog.scan(false)
 	lazy, sessionChanges, unsubscribe := catalog.snapshotAndSubscribe()
 	defer unsubscribe()
 
@@ -283,6 +288,7 @@ func runAgent(serverURL, uid string, key ed25519.PrivateKey, reg *sessions.Regis
 	}
 
 	modes := make(map[string]sessions.SessionMode)
+	sessionEnded := make(chan string, 64)
 
 	startForwarder := func(id string) {
 		sess, ok := reg.Get(id)
@@ -302,6 +308,10 @@ func runAgent(serverURL, uid string, key ed25519.PrivateKey, reg *sessions.Regis
 					return
 				case <-sess.Done():
 					send(protocol.AgentMsg{Type: "session_remove", SessionID: id})
+					select {
+					case sessionEnded <- id:
+					case <-connDone:
+					}
 					return
 				case data := <-outputCh:
 					send(protocol.AgentMsg{
@@ -315,8 +325,10 @@ func runAgent(serverURL, uid string, key ed25519.PrivateKey, reg *sessions.Regis
 	}
 
 	lazyMap := make(map[string]*lazySession, len(lazy))
+	availableLazy := make(map[string]lazySession, len(lazy))
 	for i := range lazy {
 		ls := &lazy[i]
+		availableLazy[ls.id] = *ls
 		if _, active := reg.Get(ls.id); active {
 			modes[ls.id] = ls.mode
 			startForwarder(ls.id)
@@ -359,6 +371,7 @@ func runAgent(serverURL, uid string, key ed25519.PrivateKey, reg *sessions.Regis
 		case change := <-sessionChanges:
 			if change.removeID != "" {
 				delete(lazyMap, change.removeID)
+				delete(availableLazy, change.removeID)
 				delete(modes, change.removeID)
 				send(protocol.AgentMsg{Type: "session_remove", SessionID: change.removeID})
 				continue
@@ -367,10 +380,36 @@ func runAgent(serverURL, uid string, key ed25519.PrivateKey, reg *sessions.Regis
 				continue
 			}
 			ls := *change.add
+			availableLazy[ls.id] = ls
 			lazyMap[ls.id] = &ls
+			sendSessionAdd(ls.id, ls.cmd, ls.created, ls.mode, false, 0, 0)
+
+		case id := <-sessionEnded:
+			delete(modes, id)
+			ls, ok := restoreLazySession(id, availableLazy, lazyMap)
+			if !ok {
+				continue
+			}
+			// `screen -rd` terminates the agent's active `screen -x` display but
+			// not the underlying Screen session. Re-advertise the stable catalog
+			// entry as inactive so it remains attachable from Android/web.
 			sendSessionAdd(ls.id, ls.cmd, ls.created, ls.mode, false, 0, 0)
 		}
 	}
+}
+
+func restoreLazySession(
+	id string,
+	available map[string]lazySession,
+	lazyMap map[string]*lazySession,
+) (lazySession, bool) {
+	ls, ok := available[id]
+	if !ok {
+		return lazySession{}, false
+	}
+	entry := ls
+	lazyMap[id] = &entry
+	return ls, true
 }
 
 func handleServerMsg(
@@ -405,7 +444,9 @@ func handleServerMsg(
 		if !ok {
 			return
 		}
-		sess.Resize(msg.Cols, msg.Rows)
+		if err := sess.Resize(msg.Cols, msg.Rows); err != nil {
+			log.Printf("resize %s to %dx%d: %v", msg.SessionID, msg.Cols, msg.Rows, err)
+		}
 
 	case "client_attach":
 		if ls, ok := lazyMap[msg.SessionID]; ok {
