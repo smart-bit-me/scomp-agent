@@ -37,7 +37,7 @@ Useful flags:
 | Flag | Default | Description |
 |---|---|---|
 | `--server` | `wss://link.scomp.me/agent` | Relay WebSocket URL |
-| `--mode` | `full` | Input policy: `full`, `readonly`, or `approved-only` |
+| `--mode` | `readonly` | Input policy: `full`, `readonly`, or `approved-only` |
 | `--no-qr` | false | Print the URL without rendering a terminal QR code |
 | `--version` | — | Print the build version and exit |
 
@@ -47,9 +47,11 @@ For local development:
 ./bin/scomp --server ws://localhost:8000/agent
 ```
 
-`full` mode lets an authorized remote client type arbitrary input into the PTY.
-Use `readonly` when monitoring only, or `approved-only` to accept only Enter,
-Tab, Escape, Ctrl+C, and `y`/`n` confirmation sequences.
+The safe default is `readonly`, so a connected client can monitor but cannot
+type. Select `--mode full` deliberately to let an authorized remote client type
+arbitrary input into the PTY, or `--mode approved-only` to accept only Enter,
+Tab, Escape, Ctrl+C, and `y`/`n` confirmation sequences. Unknown mode values are
+rejected instead of falling back to full control.
 
 ## Identity and pairing
 

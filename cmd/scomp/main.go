@@ -53,7 +53,7 @@ const (
 
 func main() {
 	serverURL := flag.String("server", "wss://link.scomp.me/agent", "scomp-server WebSocket URL")
-	modeFlag := flag.String("mode", "full", "session mode: full | readonly | approved-only")
+	modeFlag := flag.String("mode", "readonly", "session mode: full | readonly | approved-only")
 	noQR := flag.Bool("no-qr", false, "skip QR code, print URL only")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
@@ -75,14 +75,9 @@ func main() {
 		log.Fatalf("key: %v", err)
 	}
 
-	var defaultMode sessions.SessionMode
-	switch *modeFlag {
-	case "readonly":
-		defaultMode = sessions.ModeReadonly
-	case "approved-only":
-		defaultMode = sessions.ModeApproved
-	default:
-		defaultMode = sessions.ModeFull
+	defaultMode, err := parseSessionMode(*modeFlag)
+	if err != nil {
+		log.Fatal(err)
 	}
 
 	reg := sessions.New()
@@ -132,6 +127,19 @@ func main() {
 			log.Printf("server disconnected (%v), retrying in 5s…", err)
 		}
 		time.Sleep(5 * time.Second)
+	}
+}
+
+func parseSessionMode(value string) (sessions.SessionMode, error) {
+	switch value {
+	case "full":
+		return sessions.ModeFull, nil
+	case "readonly":
+		return sessions.ModeReadonly, nil
+	case "approved-only":
+		return sessions.ModeApproved, nil
+	default:
+		return "", fmt.Errorf("invalid --mode %q (expected full, readonly, or approved-only)", value)
 	}
 }
 
