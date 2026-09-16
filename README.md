@@ -64,6 +64,12 @@ Back up the config directory if the machine identity must survive migration.
 Key rotation is currently manual and requires clearing the relay's pinned key
 and pairing the machine again.
 
+## Compatibility
+
+Agent `v0.2.4` is the minimum recommended version for relay `v0.4.x`. It reports
+its build version during the authenticated relay handshake so paired clients can
+show update guidance. Development builds report their Git-derived build version.
+
 ## Test
 
 ```bash

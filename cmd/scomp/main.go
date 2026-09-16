@@ -231,13 +231,7 @@ func runAgent(serverURL, uid string, key ed25519.PrivateKey, reg *sessions.Regis
 	conn.SetReadLimit(1 << 20) // 1 MiB
 
 	hostname, _ := os.Hostname()
-	hello, _ := json.Marshal(protocol.AgentMsg{
-		Type:     "hello",
-		UID:      uid,
-		Version:  "1.0",
-		Hostname: hostname,
-		PubKey:   auth.PublicKeyHex(key),
-	})
+	hello, _ := json.Marshal(newAgentHello(uid, hostname, auth.PublicKeyHex(key)))
 	if err := conn.WriteMessage(websocket.TextMessage, hello); err != nil {
 		return err
 	}
@@ -451,6 +445,16 @@ func runAgent(serverURL, uid string, key ed25519.PrivateKey, reg *sessions.Regis
 			// entry as inactive so it remains attachable from Android/web.
 			sendSessionAdd(ls.id, ls.cmd, ls.created, ls.mode, false, 0, 0)
 		}
+	}
+}
+
+func newAgentHello(uid, hostname, publicKey string) protocol.AgentMsg {
+	return protocol.AgentMsg{
+		Type:     "hello",
+		UID:      uid,
+		Version:  version,
+		Hostname: hostname,
+		PubKey:   publicKey,
 	}
 }
 

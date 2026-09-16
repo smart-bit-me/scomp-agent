@@ -35,6 +35,19 @@ func TestParseSessionModeRejectsUnknownValue(t *testing.T) {
 	}
 }
 
+func TestAgentHelloReportsBuildVersion(t *testing.T) {
+	previousVersion := version
+	version = "v0.2.4"
+	t.Cleanup(func() { version = previousVersion })
+
+	hello := newAgentHello("agent-id", "host-a", "public-key")
+	if hello.Type != "hello" || hello.UID != "agent-id" ||
+		hello.Hostname != "host-a" || hello.PubKey != "public-key" ||
+		hello.Version != "v0.2.4" {
+		t.Fatalf("unexpected hello: %#v", hello)
+	}
+}
+
 func TestRestoreLazySessionAfterScreenDisplayExit(t *testing.T) {
 	entry := lazySession{id: "stable-id", cmd: "screen:yughljkkok"}
 	available := map[string]lazySession{entry.id: entry}
