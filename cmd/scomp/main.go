@@ -46,6 +46,11 @@ type lazySession struct {
 
 var version = "dev" // overridden by -ldflags at release build time
 
+const (
+	agentPingInterval = 30 * time.Second
+	agentWriteTimeout = 10 * time.Second
+)
+
 func main() {
 	serverURL := flag.String("server", "wss://link.scomp.me/agent", "scomp-server WebSocket URL")
 	modeFlag := flag.String("mode", "full", "session mode: full | readonly | approved-only")
@@ -245,10 +250,26 @@ func runAgent(serverURL, uid string, key ed25519.PrivateKey, reg *sessions.Regis
 
 	sendCh := make(chan []byte, 512)
 	connDone := make(chan struct{})
+	connErr := make(chan error, 1)
+	var closeConnOnce sync.Once
+	closeConnection := func(err error) {
+		closeConnOnce.Do(func() {
+			if err != nil {
+				connErr <- err
+			}
+			close(connDone)
+			// Unblock ReadMessage immediately when the writer discovers a dead
+			// connection. Without this, reconnect waits for the read side or the
+			// network stack to notice the failure independently.
+			conn.Close()
+		})
+	}
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		ping := time.NewTicker(agentPingInterval)
+		defer ping.Stop()
 		// Exit on connDone rather than on a close(sendCh): other goroutines
 		// (forwarders, the main loop) may still call send() during teardown,
 		// and closing sendCh under them would panic with "send on closed channel".
@@ -257,7 +278,20 @@ func runAgent(serverURL, uid string, key ed25519.PrivateKey, reg *sessions.Regis
 			case <-connDone:
 				return
 			case data := <-sendCh:
-				conn.WriteMessage(websocket.TextMessage, data)
+				conn.SetWriteDeadline(time.Now().Add(agentWriteTimeout))
+				if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
+					closeConnection(fmt.Errorf("write: %w", err))
+					return
+				}
+			case <-ping.C:
+				// Keep the otherwise-idle agent connection alive through reverse
+				// proxies and load balancers. Gorilla handles the peer's pong in
+				// ReadMessage; all writes stay in this one goroutine.
+				conn.SetWriteDeadline(time.Now().Add(agentWriteTimeout))
+				if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+					closeConnection(fmt.Errorf("ping: %w", err))
+					return
+				}
 			}
 		}
 	}()
@@ -268,6 +302,9 @@ func runAgent(serverURL, uid string, key ed25519.PrivateKey, reg *sessions.Regis
 		case sendCh <- data:
 		case <-connDone:
 		default:
+			// Dropping terminal input/control/output silently corrupts the remote
+			// view. Reconnect instead; the next attach receives a fresh snapshot.
+			closeConnection(fmt.Errorf("outbound queue full"))
 		}
 	}
 
@@ -296,7 +333,9 @@ func runAgent(serverURL, uid string, key ed25519.PrivateKey, reg *sessions.Regis
 			return
 		}
 		outputCh := make(chan []byte, 256)
-		sess.Subscribe((chan<- []byte)(outputCh))
+		sess.Subscribe((chan<- []byte)(outputCh), func() {
+			closeConnection(fmt.Errorf("PTY output subscriber too slow"))
+		})
 
 		wg.Add(1)
 		go func() {
@@ -349,7 +388,7 @@ func runAgent(serverURL, uid string, key ed25519.PrivateKey, reg *sessions.Regis
 		for {
 			_, raw, err := conn.ReadMessage()
 			if err != nil {
-				close(connDone)
+				closeConnection(fmt.Errorf("read: %w", err))
 				return
 			}
 			var msg protocol.ServerMsg
@@ -361,10 +400,19 @@ func runAgent(serverURL, uid string, key ed25519.PrivateKey, reg *sessions.Regis
 
 	for {
 		select {
+		case err := <-connErr:
+			wg.Wait()
+			return err
+
 		case msg, ok := <-readCh:
 			if !ok {
 				wg.Wait()
-				return fmt.Errorf("connection closed")
+				select {
+				case err := <-connErr:
+					return err
+				default:
+					return fmt.Errorf("connection closed")
+				}
 			}
 			handleServerMsg(msg, reg, modes, lazyMap, send, sendSessionAdd, startForwarder)
 

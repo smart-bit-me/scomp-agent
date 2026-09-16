@@ -10,25 +10,32 @@ import (
 )
 
 // LoadOrCreateUID reads the UID from configDir/uid.
-// If the file does not exist or is malformed a new 32-hex-char UID is generated
-// and persisted there with mode 0600.
+// If the file does not exist, a new 32-hex-char UID is created atomically. A
+// malformed existing identity fails closed instead of silently rotating a UID
+// that may already be paired at the relay.
 func LoadOrCreateUID(configDir string) (string, error) {
-	if err := os.MkdirAll(configDir, 0700); err != nil {
+	if err := preparePrivateDir(configDir); err != nil {
 		return "", err
 	}
 	path := filepath.Join(configDir, "uid")
-	if data, err := os.ReadFile(path); err == nil {
+	if data, exists, err := readPrivateFile(path); err != nil {
+		return "", fmt.Errorf("reading uid: %w", err)
+	} else if exists {
 		uid := strings.TrimSpace(string(data))
-		if len(uid) == 32 {
+		decoded, decodeErr := hex.DecodeString(uid)
+		if decodeErr == nil && len(decoded) == 16 {
 			return uid, nil
 		}
+		return "", fmt.Errorf("invalid uid file %s; restore it or remove it and re-pair explicitly", path)
 	}
 	b := make([]byte, 16)
 	if _, err := rand.Read(b); err != nil {
 		return "", fmt.Errorf("generating uid: %w", err)
 	}
 	uid := hex.EncodeToString(b)
-	if err := os.WriteFile(path, []byte(uid+"\n"), 0600); err != nil {
+	if err := createPrivateFile(path, []byte(uid+"\n")); os.IsExist(err) {
+		return LoadOrCreateUID(configDir)
+	} else if err != nil {
 		return "", fmt.Errorf("saving uid: %w", err)
 	}
 	return uid, nil

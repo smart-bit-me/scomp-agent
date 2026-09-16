@@ -101,7 +101,7 @@ type Session struct {
 	trackerMu sync.RWMutex // guards tracker
 
 	subsMu sync.RWMutex
-	subs   map[chan<- []byte]struct{}
+	subs   map[chan<- []byte]func()
 
 	readOnce  sync.Once
 	closeOnce sync.Once
@@ -122,7 +122,7 @@ func New(shellCmd string, args []string, cols, rows uint16) (*Session, error) {
 		ptmx: ptmx,
 		cmd:  cmd,
 		ring: ring.New(ring.DefaultSize),
-		subs: make(map[chan<- []byte]struct{}),
+		subs: make(map[chan<- []byte]func()),
 		done: make(chan struct{}),
 	}
 	s.startReadLoop()
@@ -155,18 +155,28 @@ func (s *Session) readLoop() {
 
 func (s *Session) broadcast(data []byte) {
 	s.subsMu.RLock()
-	defer s.subsMu.RUnlock()
-	for ch := range s.subs {
+	subs := make(map[chan<- []byte]func(), len(s.subs))
+	for ch, overflow := range s.subs {
+		subs[ch] = overflow
+	}
+	s.subsMu.RUnlock()
+	for ch, overflow := range subs {
 		select {
 		case ch <- data:
 		default:
+			// A missing terminal frame corrupts the subscriber's rendered state.
+			// Signal overload so the transport reconnects and obtains a fresh
+			// ring-buffer snapshot instead of continuing from a silent gap.
+			if overflow != nil {
+				overflow()
+			}
 		}
 	}
 }
 
-func (s *Session) Subscribe(ch chan<- []byte) {
+func (s *Session) Subscribe(ch chan<- []byte, overflow func()) {
 	s.subsMu.Lock()
-	s.subs[ch] = struct{}{}
+	s.subs[ch] = overflow
 	s.subsMu.Unlock()
 }
 
