@@ -1,6 +1,6 @@
 module github.com/smart-bit-me/scomp-agent
 
-go 1.25.0
+go 1.27.1
 
 require (
 	github.com/creack/pty v1.1.24
