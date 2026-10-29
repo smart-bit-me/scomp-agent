@@ -3,9 +3,10 @@
 ## Trust model
 
 `scomp` attaches a remote client to terminal sessions running as your local
-user. In the default `--mode full`, anyone authorized by the relay to open that
-session can send arbitrary keystrokes and therefore execute commands with your
-local account's permissions.
+user. The default `--mode readonly` lets an authorized client watch sessions but
+drops all remote input. With `--mode full`, anyone authorized by the relay to
+open a session can send arbitrary keystrokes and therefore execute commands with
+your local account's permissions; enable it deliberately.
 
 The agent authenticates itself to the relay with an Ed25519 key stored at
 `~/.config/scomp/key`. This prevents another client that only knows the public
@@ -13,15 +14,15 @@ UID from impersonating an already-pinned agent. It does not make the relay
 zero-knowledge or end-to-end encrypted: the relay handles plaintext terminal
 traffic and remains part of the trusted computing base.
 
-For monitoring without remote command input, run:
+To allow arbitrary remote input, run:
 
 ```bash
-scomp --mode readonly
+scomp --mode full
 ```
 
 `--mode approved-only` permits only a small set of confirmation/control
 sequences (Enter, Tab, Escape, Ctrl+C, and `y`/`n`). The mode is enforced by the
-agent, not by the relay.
+agent, not by the relay. Read-only sessions also ignore remote resize requests.
 
 ## Protecting local identity
 
