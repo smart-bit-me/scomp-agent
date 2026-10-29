@@ -51,6 +51,9 @@ Always run `gofmt -w` on touched files and `make test` before committing.
   pins the public key on first use.
 - **Pairing reads stdin.** `pair_request` handling prompts in the foreground;
   background/non-interactive agents cannot complete initial account pairing.
+  `pairPrompter` owns the only stdin reader; a prompt expires after 2 min, a
+  newer request replaces it, and the PIN goes out on the connection that is
+  current when it is typed.
 - **Session modes are enforced agent-side.** The relay is not trusted to enforce
   `readonly` or `approved-only`; keep input checks in `handleServerMsg`.
 - **Session discovery is event-driven.** GNU screen uses socket filesystem

@@ -4,7 +4,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -21,7 +20,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -132,8 +130,9 @@ func main() {
 	catalog := newSessionCatalog(reg, defaultMode, onTmuxActivated)
 	go watchSessions(ctx, catalog)
 
+	prompter := newPairPrompter(os.Stdin, os.Stdout, pairPromptTTL)
 	for {
-		if err := runAgent(*serverURL, uid, key, reg, catalog); err != nil {
+		if err := runAgent(*serverURL, uid, key, reg, catalog, prompter); err != nil {
 			log.Printf("server disconnected (%v), retrying in 5s…", err)
 		}
 		time.Sleep(5 * time.Second)
@@ -244,7 +243,13 @@ func answerChallenge(conn *websocket.Conn, key ed25519.PrivateKey) error {
 	return conn.WriteMessage(websocket.TextMessage, resp)
 }
 
-func runAgent(serverURL, uid string, key ed25519.PrivateKey, reg *sessions.Registry, catalog *sessionCatalog) error {
+func runAgent(
+	serverURL, uid string,
+	key ed25519.PrivateKey,
+	reg *sessions.Registry,
+	catalog *sessionCatalog,
+	prompter *pairPrompter,
+) error {
 	conn, _, err := websocket.DefaultDialer.Dial(serverURL, nil)
 	if err != nil {
 		return err
@@ -334,6 +339,27 @@ func runAgent(serverURL, uid string, key ed25519.PrivateKey, reg *sessions.Regis
 			closeConnection(fmt.Errorf("outbound queue full"))
 		}
 	}
+
+	// sendOK queues msg like send and reports whether it was queued on this
+	// still-open connection.
+	sendOK := func(msg protocol.AgentMsg) bool {
+		data, _ := json.Marshal(msg)
+		select {
+		case <-connDone:
+			return false
+		default:
+		}
+		select {
+		case sendCh <- data:
+			return true
+		case <-connDone:
+			return false
+		default:
+			closeConnection(fmt.Errorf("outbound queue full"))
+			return false
+		}
+	}
+	defer prompter.connected(sendOK)()
 
 	// sendWait blocks until msg is queued or the connection is torn down. The
 	// session forwarders use it so a burst of snapshot chunks cannot overflow
@@ -454,6 +480,17 @@ func runAgent(serverURL, uid string, key ed25519.PrivateKey, reg *sessions.Regis
 		}
 	}
 
+	env := &serverMsgEnv{
+		reg:             reg,
+		modes:           modes,
+		lazyMap:         lazyMap,
+		send:            send,
+		sendSessionAdd:  sendSessionAdd,
+		startForwarder:  startForwarder,
+		requestSnapshot: requestSnapshot,
+		pairRequest:     prompter.request,
+	}
+
 	// Read incoming server messages in a goroutine so we can also select on
 	// event-driven multiplexer lifecycle changes.
 	readCh := make(chan protocol.ServerMsg, 64)
@@ -479,7 +516,7 @@ func runAgent(serverURL, uid string, key ed25519.PrivateKey, reg *sessions.Regis
 					return fmt.Errorf("connection closed")
 				}
 			}
-			handleServerMsg(msg, reg, modes, lazyMap, send, sendSessionAdd, startForwarder, requestSnapshot)
+			handleServerMsg(msg, env)
 
 		case change := <-sessionChanges:
 			if change.removeID != "" {
@@ -605,16 +642,21 @@ func restoreLazySession(
 	return ls, true
 }
 
-func handleServerMsg(
-	msg protocol.ServerMsg,
-	reg *sessions.Registry,
-	modes map[string]sessions.SessionMode,
-	lazyMap map[string]*lazySession,
-	send func(protocol.AgentMsg),
-	sendSessionAdd func(id, cmd string, created time.Time, mode sessions.SessionMode, active bool, cols, rows uint16),
-	startForwarder func(id string),
-	requestSnapshot func(sessionID, clientID string),
-) {
+// serverMsgEnv is the per-connection state and callbacks handleServerMsg
+// acts on. It is owned by runAgent's main loop.
+type serverMsgEnv struct {
+	reg             *sessions.Registry
+	modes           map[string]sessions.SessionMode
+	lazyMap         map[string]*lazySession
+	send            func(protocol.AgentMsg)
+	sendSessionAdd  func(id, cmd string, created time.Time, mode sessions.SessionMode, active bool, cols, rows uint16)
+	startForwarder  func(id string)
+	requestSnapshot func(sessionID, clientID string)
+	pairRequest     func(pairID string)
+}
+
+func handleServerMsg(msg protocol.ServerMsg, env *serverMsgEnv) {
+	reg, modes, lazyMap := env.reg, env.modes, env.lazyMap
 	switch msg.Type {
 	case "input":
 		sess, ok := reg.Get(msg.SessionID)
@@ -664,21 +706,23 @@ func handleServerMsg(
 					return
 				}
 				modes[ls.id] = ls.mode
-				startForwarder(ls.id)
+				env.startForwarder(ls.id)
 				// Notify the server (and browser) that the session is now live.
-				sendSessionAdd(ls.id, ls.cmd, ls.created, ls.mode, true, cols, rows)
+				env.sendSessionAdd(ls.id, ls.cmd, ls.created, ls.mode, true, cols, rows)
 				log.Printf("activated: %s (%s)", ls.cmd, ls.id)
 			}
 			delete(lazyMap, ls.id)
 		}
-		requestSnapshot(msg.SessionID, msg.ClientID)
+		env.requestSnapshot(msg.SessionID, msg.ClientID)
 
 	case "pair_request":
 		// A signed-in browser asked to link this host. Prompt on the terminal;
 		// the user must type the PIN shown in their browser. This proves TTY
-		// access to the host, not just knowledge of the uid (F1). Runs in a
-		// goroutine so the blocking stdin read does not stall the read loop.
-		go promptPairPIN(msg.PairID, send)
+		// access to the host, not just knowledge of the uid (F1). The prompt
+		// runs on its own goroutine, so stdin never stalls the read loop.
+		if env.pairRequest != nil {
+			env.pairRequest(msg.PairID)
+		}
 	}
 }
 
@@ -706,36 +750,6 @@ func sendSnapshot(sessionID, clientID string, data []byte, enqueue func(protocol
 		}
 	}
 	enqueue(protocol.AgentMsg{Type: "snapshot_end", SessionID: sessionID, ClientID: clientID, Seq: seq})
-}
-
-// pairInProgress ensures only one terminal PIN prompt is active at a time, even
-// if the server (or a rogue relay) sends overlapping pair_request messages.
-var pairInProgress atomic.Bool
-
-// promptPairPIN prints a pairing prompt on the agent's terminal, reads one line
-// from stdin, and replies with pair_submit carrying the typed PIN. When stdin is
-// not a terminal (agent backgrounded / piped) the read returns EOF with no data
-// and pairing is aborted — pairing requires running scomp in the foreground.
-func promptPairPIN(pairID string, send func(protocol.AgentMsg)) {
-	if !pairInProgress.CompareAndSwap(false, true) {
-		return
-	}
-	defer pairInProgress.Store(false)
-
-	fmt.Print("\n[scomp] Pairing requested from a browser.\n" +
-		"        Enter the PIN shown there to link this machine: ")
-	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
-	pin := strings.TrimSpace(line)
-	if pin == "" {
-		if err != nil {
-			fmt.Println("\n[scomp] pairing aborted (stdin not a terminal — run scomp in the foreground).")
-		} else {
-			fmt.Println("[scomp] pairing aborted (empty PIN).")
-		}
-		return
-	}
-	send(protocol.AgentMsg{Type: "pair_submit", PairID: pairID, PIN: pin})
-	fmt.Println("[scomp] PIN submitted — check your browser.")
 }
 
 func newSessionID() string {

@@ -63,10 +63,11 @@ func TestClientAttachRequestsSnapshotForTheClient(t *testing.T) {
 	var gotSession, gotClient string
 	handleServerMsg(
 		protocol.ServerMsg{Type: "client_attach", SessionID: "missing", ClientID: "c9"},
-		sessions.New(), map[string]sessions.SessionMode{}, map[string]*lazySession{},
-		func(protocol.AgentMsg) { t.Fatal("client_attach sent directly instead of via requestSnapshot") },
-		nil, nil,
-		func(sessionID, clientID string) { gotSession, gotClient = sessionID, clientID },
+		&serverMsgEnv{
+			reg: sessions.New(), modes: map[string]sessions.SessionMode{}, lazyMap: map[string]*lazySession{},
+			send:            func(protocol.AgentMsg) { t.Fatal("client_attach sent directly instead of via requestSnapshot") },
+			requestSnapshot: func(sessionID, clientID string) { gotSession, gotClient = sessionID, clientID },
+		},
 	)
 	if gotSession != "missing" || gotClient != "c9" {
 		t.Fatalf("requestSnapshot(%q, %q)", gotSession, gotClient)

@@ -70,11 +70,7 @@ func TestHandleResizeHonorsMode(t *testing.T) {
 			}
 			handleServerMsg(
 				protocol.ServerMsg{Type: "resize", SessionID: info.ID, Cols: 123, Rows: 45},
-				reg, modes, map[string]*lazySession{},
-				func(protocol.AgentMsg) {},
-				func(string, string, time.Time, sessions.SessionMode, bool, uint16, uint16) {},
-				func(string) {},
-				func(string, string) {},
+				&serverMsgEnv{reg: reg, modes: modes, lazyMap: map[string]*lazySession{}},
 			)
 
 			if saw := waitForOutput("45 123", time.Second); saw != tt.resized {
@@ -105,8 +101,10 @@ func TestClientAttachSizeOnlyActivatesLazySessions(t *testing.T) {
 			}}
 			handleServerMsg(
 				protocol.ServerMsg{Type: "client_attach", SessionID: "lazy", ClientID: "c1", Cols: tt.cols, Rows: tt.rows},
-				sessions.New(), map[string]sessions.SessionMode{}, lazy,
-				func(protocol.AgentMsg) {}, nil, nil, func(string, string) {},
+				&serverMsgEnv{
+					reg: sessions.New(), modes: map[string]sessions.SessionMode{}, lazyMap: lazy,
+					send: func(protocol.AgentMsg) {}, requestSnapshot: func(string, string) {},
+				},
 			)
 			if gotCols != tt.wantCols || gotRows != tt.wantRo {
 				t.Fatalf("activate(%d, %d), want (%d, %d)", gotCols, gotRows, tt.wantCols, tt.wantRo)
@@ -134,8 +132,10 @@ func TestClientAttachNeverResizesActivePTY(t *testing.T) {
 	modes := map[string]sessions.SessionMode{info.ID: sessions.ModeFull}
 	handleServerMsg(
 		protocol.ServerMsg{Type: "client_attach", SessionID: info.ID, ClientID: "c1", Cols: 123, Rows: 45},
-		reg, modes, map[string]*lazySession{},
-		func(protocol.AgentMsg) {}, nil, nil, func(string, string) {},
+		&serverMsgEnv{
+			reg: reg, modes: modes, lazyMap: map[string]*lazySession{},
+			send: func(protocol.AgentMsg) {}, requestSnapshot: func(string, string) {},
+		},
 	)
 	time.Sleep(300 * time.Millisecond)
 	if out := string(reg.Snapshot(info.ID)); strings.Contains(out, "45 123") {
