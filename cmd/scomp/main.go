@@ -49,6 +49,11 @@ var version = "dev" // overridden by -ldflags at release build time
 const (
 	agentPingInterval = 30 * time.Second
 	agentWriteTimeout = 10 * time.Second
+	// agentReadTimeout matches the relay's read deadline. The relay pings
+	// every 30 s, so a healthy connection always delivers a frame well within
+	// this window; a half-open one is torn down instead of lingering until
+	// the TCP stack gives up.
+	agentReadTimeout = 90 * time.Second
 )
 
 func main() {
@@ -242,6 +247,7 @@ func runAgent(serverURL, uid string, key ed25519.PrivateKey, reg *sessions.Regis
 	if err := answerChallenge(conn, key); err != nil {
 		return err
 	}
+	reader := newDeadlineReader(conn, agentReadTimeout)
 	// Reconcile against the actual tmux/Screen sockets after every relay
 	// reconnect. A long-running filesystem watcher can miss an event (for
 	// example after an overflow); without this refresh, a relay restart would
@@ -386,7 +392,7 @@ func runAgent(serverURL, uid string, key ed25519.PrivateKey, reg *sessions.Regis
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		readServerMessages(conn, readCh, connDone, closeConnection)
+		readServerMessages(reader, readCh, connDone, closeConnection)
 	}()
 
 	for {
@@ -439,6 +445,42 @@ func runAgent(serverURL, uid string, key ed25519.PrivateKey, reg *sessions.Regis
 
 type messageReader interface {
 	ReadMessage() (messageType int, p []byte, err error)
+}
+
+// deadlineReader keeps a rolling read deadline on conn: it is extended by
+// every received data message, ping, and pong. Pings are still answered with
+// pongs by wrapping the connection's default ping handler. All extensions
+// happen inside ReadMessage, i.e. on the single reader goroutine.
+type deadlineReader struct {
+	conn    *websocket.Conn
+	timeout time.Duration
+}
+
+func newDeadlineReader(conn *websocket.Conn, timeout time.Duration) *deadlineReader {
+	r := &deadlineReader{conn: conn, timeout: timeout}
+	replyPong := conn.PingHandler()
+	conn.SetPingHandler(func(appData string) error {
+		r.extend()
+		return replyPong(appData)
+	})
+	conn.SetPongHandler(func(string) error {
+		r.extend()
+		return nil
+	})
+	r.extend()
+	return r
+}
+
+func (r *deadlineReader) extend() {
+	r.conn.SetReadDeadline(time.Now().Add(r.timeout))
+}
+
+func (r *deadlineReader) ReadMessage() (int, []byte, error) {
+	messageType, p, err := r.conn.ReadMessage()
+	if err == nil {
+		r.extend()
+	}
+	return messageType, p, err
 }
 
 // readServerMessages decodes relay messages into readCh until the connection
