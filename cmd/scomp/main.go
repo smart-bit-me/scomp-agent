@@ -525,6 +525,11 @@ func handleServerMsg(
 		if !ok {
 			return
 		}
+		// Resizing changes the shared tmux/Screen PTY seen by the local user,
+		// so read-only viewers (and sessions with no known mode) may not do it.
+		if !resizeAllowed(modes[msg.SessionID]) {
+			return
+		}
 		if err := sess.Resize(msg.Cols, msg.Rows); err != nil {
 			log.Printf("resize %s to %dx%d: %v", msg.SessionID, msg.Cols, msg.Rows, err)
 		}
@@ -621,6 +626,12 @@ func inputAllowed(mode sessions.SessionMode, data []byte) bool {
 	default:
 		return false
 	}
+}
+
+// resizeAllowed reports whether a remote client may resize a session's PTY.
+// Like inputAllowed it fails closed for readonly, missing, and unknown modes.
+func resizeAllowed(mode sessions.SessionMode) bool {
+	return mode == sessions.ModeFull || mode == sessions.ModeApproved
 }
 
 var approvedSequences = [][]byte{
