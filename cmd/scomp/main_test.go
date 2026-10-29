@@ -1,9 +1,12 @@
 package main
 
 import (
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/smart-bit-me/scomp-agent/internal/sessions"
+	"github.com/smart-bit-me/scomp-agent/protocol"
 )
 
 func TestParseSessionMode(t *testing.T) {
@@ -114,5 +117,37 @@ func TestIsApproved(t *testing.T) {
 		if isApproved([]byte(s)) {
 			t.Errorf("isApproved(%q) = true, want false", s)
 		}
+	}
+}
+
+// TestClientAttachRetiresAnEndedSessionFirst: an attach that arrives after
+// the session's PTY ended, but before the main loop processed the end, must
+// retire the session first (restoring its lazy entry) and then reactivate
+// it, instead of being answered from the dead PTY.
+func TestClientAttachRetiresAnEndedSessionFirst(t *testing.T) {
+	lazyMap := map[string]*lazySession{}
+	var steps []string
+	entry := &lazySession{id: "s1", cmd: "screen:work", mode: sessions.ModeReadonly,
+		activate: func(uint16, uint16) error { steps = append(steps, "activate"); return nil }}
+	handleServerMsg(
+		protocol.ServerMsg{Type: "client_attach", SessionID: "s1", ClientID: "c1"},
+		&serverMsgEnv{
+			reg: sessions.New(), modes: map[string]sessions.SessionMode{}, lazyMap: lazyMap,
+			send: func(protocol.AgentMsg) {},
+			sendSessionAdd: func(_, _ string, _ time.Time, _ sessions.SessionMode, active bool, _, _ uint16) {
+				if active {
+					steps = append(steps, "advertise-active")
+				}
+			},
+			startForwarder:  func(string) { steps = append(steps, "forward") },
+			requestSnapshot: func(string, string) { steps = append(steps, "snapshot") },
+			finishIfEnded: func(id string) {
+				steps = append(steps, "retire")
+				lazyMap[id] = entry // what restoreLazySession does
+			},
+		},
+	)
+	if got := strings.Join(steps, ","); got != "retire,activate,forward,advertise-active,snapshot" {
+		t.Fatalf("steps = %s", got)
 	}
 }

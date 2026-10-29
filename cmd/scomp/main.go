@@ -392,12 +392,12 @@ func runAgent(
 	}
 
 	modes := make(map[string]sessions.SessionMode)
-	sessionEnded := make(chan string, 64)
+	sessionEnded := make(chan *forwarder, 64)
 
-	// forwarders maps an active session to its forwarder's event stream. It is
-	// owned by this function's main loop (startForwarder and requestSnapshot
-	// only run there).
-	forwarders := make(map[string]chan<- pty.Event)
+	// forwarders maps an active session to its forwarder. It is owned by this
+	// function's main loop (startForwarder, requestSnapshot, and
+	// finishSession only run there).
+	forwarders := make(map[string]*forwarder)
 
 	startForwarder := func(id string) {
 		sess, ok := reg.Get(id)
@@ -408,22 +408,31 @@ func runAgent(
 		sess.Subscribe(outputCh, func() {
 			closeConnection(fmt.Errorf("PTY output subscriber too slow"))
 		})
-		forwarders[id] = outputCh
+		fw := &forwarder{id: id, events: outputCh, exited: make(chan struct{})}
+		forwarders[id] = fw
 
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			defer sess.Unsubscribe(outputCh)
+			ended := false
+			defer func() {
+				sess.Unsubscribe(outputCh)
+				// exited first: finishSession may be waiting for it while
+				// this goroutine waits for room in sessionEnded.
+				close(fw.exited)
+				if ended {
+					select {
+					case sessionEnded <- fw:
+					case <-connDone:
+					}
+				}
+			}()
 			for {
 				select {
 				case <-connDone:
 					return
 				case <-sess.Done():
-					send(protocol.AgentMsg{Type: "session_remove", SessionID: id})
-					select {
-					case sessionEnded <- id:
-					case <-connDone:
-					}
+					ended = true
 					return
 				case ev := <-outputCh:
 					// Output and snapshots for this session leave through this
@@ -452,7 +461,7 @@ func runAgent(
 	// A session with no PTY has emitted nothing, so its snapshot is empty.
 	requestSnapshot := func(sessionID, clientID string) {
 		sess, active := reg.Get(sessionID)
-		events, forwarding := forwarders[sessionID]
+		fw, forwarding := forwarders[sessionID]
 		if !active || !forwarding {
 			sendSnapshot(sessionID, clientID, nil, func(msg protocol.AgentMsg) bool {
 				send(msg)
@@ -460,13 +469,50 @@ func runAgent(
 			})
 			return
 		}
-		if !sess.RequestSnapshot(events, clientID) {
+		if !sess.RequestSnapshot(fw.events, clientID) {
 			closeConnection(fmt.Errorf("PTY output subscriber too slow"))
 		}
 	}
 
 	lazyMap := make(map[string]*lazySession, len(lazy))
 	availableLazy := make(map[string]lazySession, len(lazy))
+
+	// finishSession retires an ended session's forwarder exactly once and in
+	// order: wait for the forwarder to stop (its last output is queued), send
+	// session_remove, and re-advertise the stable catalog entry as inactive.
+	// `screen -rd` ends the agent's `screen -x` display but not the Screen
+	// session, so it stays attachable from Android/web. A stale notification
+	// for a forwarder that was already retired is ignored.
+	finishSession := func(fw *forwarder) {
+		if forwarders[fw.id] != fw {
+			return
+		}
+		select {
+		case <-fw.exited:
+		case <-connDone:
+			return
+		}
+		delete(forwarders, fw.id)
+		delete(modes, fw.id)
+		send(protocol.AgentMsg{Type: "session_remove", SessionID: fw.id})
+		if ls, ok := restoreLazySession(fw.id, availableLazy, lazyMap); ok {
+			sendSessionAdd(ls.id, ls.cmd, ls.created, ls.mode, false, 0, 0)
+		}
+	}
+	// finishIfEnded handles a client_attach that arrives after a session's PTY
+	// ended but before the main loop saw the forwarder's notification: the
+	// session is retired first, so the attach reactivates the restored lazy
+	// entry instead of being answered from a dead PTY.
+	finishIfEnded := func(id string) {
+		fw, forwarding := forwarders[id]
+		if !forwarding {
+			return
+		}
+		if _, alive := reg.Get(id); alive {
+			return
+		}
+		finishSession(fw)
+	}
 	for i := range lazy {
 		ls := &lazy[i]
 		availableLazy[ls.id] = *ls
@@ -488,6 +534,7 @@ func runAgent(
 		sendSessionAdd:  sendSessionAdd,
 		startForwarder:  startForwarder,
 		requestSnapshot: requestSnapshot,
+		finishIfEnded:   finishIfEnded,
 		pairRequest:     prompter.request,
 	}
 
@@ -534,19 +581,17 @@ func runAgent(
 			lazyMap[ls.id] = &ls
 			sendSessionAdd(ls.id, ls.cmd, ls.created, ls.mode, false, 0, 0)
 
-		case id := <-sessionEnded:
-			delete(modes, id)
-			delete(forwarders, id)
-			ls, ok := restoreLazySession(id, availableLazy, lazyMap)
-			if !ok {
-				continue
-			}
-			// `screen -rd` terminates the agent's active `screen -x` display but
-			// not the underlying Screen session. Re-advertise the stable catalog
-			// entry as inactive so it remains attachable from Android/web.
-			sendSessionAdd(ls.id, ls.cmd, ls.created, ls.mode, false, 0, 0)
+		case fw := <-sessionEnded:
+			finishSession(fw)
 		}
 	}
+}
+
+// forwarder is one active session's output pump to the relay.
+type forwarder struct {
+	id     string
+	events chan pty.Event
+	exited chan struct{} // closed once the goroutine stops sending
 }
 
 type messageReader interface {
@@ -652,6 +697,7 @@ type serverMsgEnv struct {
 	sendSessionAdd  func(id, cmd string, created time.Time, mode sessions.SessionMode, active bool, cols, rows uint16)
 	startForwarder  func(id string)
 	requestSnapshot func(sessionID, clientID string)
+	finishIfEnded   func(id string) // optional; see runAgent
 	pairRequest     func(pairID string)
 }
 
@@ -689,6 +735,9 @@ func handleServerMsg(msg protocol.ServerMsg, env *serverMsgEnv) {
 		}
 
 	case "client_attach":
+		if env.finishIfEnded != nil {
+			env.finishIfEnded(msg.SessionID)
+		}
 		// cols/rows only size a lazy session's new PTY. Attaching never resizes
 		// an existing PTY, and 0 (sent for read-only clients) means "no size
 		// preference": use the default only when the PTY must be created.

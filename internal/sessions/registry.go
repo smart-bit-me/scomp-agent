@@ -86,12 +86,10 @@ func (r *Registry) Create(cmd string, args []string, cols, rows uint16) (Info, *
 
 	if src != "" {
 		r.mu.RLock()
-		if id, ok := r.sourceToID[src]; ok {
-			if e, ok := r.entries[id]; ok {
-				info, sess := e.Info, e.session
-				r.mu.RUnlock()
-				return info, sess, nil
-			}
+		if e, ok := r.liveSourceLocked(src); ok {
+			info, sess := e.Info, e.session
+			r.mu.RUnlock()
+			return info, sess, nil
 		}
 		r.mu.RUnlock()
 	}
@@ -109,25 +107,59 @@ func (r *Registry) Create(cmd string, args []string, cols, rows uint16) (Info, *
 		r.sourceToID[src] = id
 	}
 	r.mu.Unlock()
-
-	go func() {
-		<-sess.Done()
-		r.mu.Lock()
-		delete(r.entries, id)
-		if src != "" {
-			delete(r.sourceToID, src)
-		}
-		r.mu.Unlock()
-	}()
+	go r.forgetWhenDone(id, sess)
 
 	return info, sess, nil
 }
 
+// alive reports whether a session's PTY is still running. A session is
+// marked done before forgetWhenDone removes it from the maps, so lookups
+// check this instead of trusting map presence.
+func alive(sess *pty.Session) bool {
+	select {
+	case <-sess.Done():
+		return false
+	default:
+		return true
+	}
+}
+
+func (r *Registry) liveSourceLocked(src string) (*entry, bool) {
+	id, ok := r.sourceToID[src]
+	if !ok {
+		return nil, false
+	}
+	e, ok := r.entries[id]
+	if !ok || !alive(e.session) {
+		return nil, false
+	}
+	return e, true
+}
+
+// forgetWhenDone removes id once sess ends, but only while id still refers
+// to sess: a lazy session reactivated under the same id must not lose its
+// new entry to the old session's late cleanup.
+func (r *Registry) forgetWhenDone(id string, sess *pty.Session) {
+	<-sess.Done()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	e, ok := r.entries[id]
+	if !ok || e.session != sess {
+		return
+	}
+	delete(r.entries, id)
+	if e.source != "" && r.sourceToID[e.source] == id {
+		delete(r.sourceToID, e.source)
+	}
+}
+
+// Get returns a running session. A session whose PTY has ended is reported
+// as missing even before its cleanup runs.
 func (r *Registry) Get(id string) (*pty.Session, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	e, ok := r.entries[id]
-	if !ok {
+	if !ok || !alive(e.session) {
 		return nil, false
 	}
 	return e.session, true
@@ -159,26 +191,17 @@ func (r *Registry) CreateWithID(id, cmd string, args []string, cols, rows uint16
 	src := sourceKey(cmd, args)
 
 	if src != "" {
-		r.mu.RLock()
-		if existingID, ok := r.sourceToID[src]; ok {
-			if e, ok := r.entries[existingID]; ok {
-				info, sess := e.Info, e.session
-				r.mu.RUnlock()
-				// Register the requested id as an alias so reg.Get(id) succeeds
-				// for startForwarder — without this, the forwarder never starts.
-				r.mu.Lock()
-				r.entries[id] = &entry{Info: Info{ID: id, Cmd: info.Cmd, Created: info.Created}, session: sess}
-				r.mu.Unlock()
-				go func() {
-					<-sess.Done()
-					r.mu.Lock()
-					delete(r.entries, id)
-					r.mu.Unlock()
-				}()
-				return info, sess, nil
-			}
+		r.mu.Lock()
+		if e, ok := r.liveSourceLocked(src); ok {
+			info, sess := e.Info, e.session
+			// Register the requested id as an alias so reg.Get(id) succeeds
+			// for startForwarder — without this, the forwarder never starts.
+			r.entries[id] = &entry{Info: Info{ID: id, Cmd: info.Cmd, Created: info.Created}, session: sess}
+			r.mu.Unlock()
+			go r.forgetWhenDone(id, sess)
+			return info, sess, nil
 		}
-		r.mu.RUnlock()
+		r.mu.Unlock()
 	}
 
 	sess, err := pty.New(cmd, args, cols, rows)
@@ -193,16 +216,7 @@ func (r *Registry) CreateWithID(id, cmd string, args []string, cols, rows uint16
 		r.sourceToID[src] = id
 	}
 	r.mu.Unlock()
-
-	go func() {
-		<-sess.Done()
-		r.mu.Lock()
-		delete(r.entries, id)
-		if src != "" {
-			delete(r.sourceToID, src)
-		}
-		r.mu.Unlock()
-	}()
+	go r.forgetWhenDone(id, sess)
 
 	return info, sess, nil
 }
@@ -212,7 +226,7 @@ func (r *Registry) Remove(id string) {
 	e, ok := r.entries[id]
 	if ok {
 		delete(r.entries, id)
-		if e.source != "" {
+		if e.source != "" && r.sourceToID[e.source] == id {
 			delete(r.sourceToID, e.source)
 		}
 	}
