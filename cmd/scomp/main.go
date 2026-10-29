@@ -28,6 +28,7 @@ import (
 	qrcode "github.com/skip2/go-qrcode"
 
 	"github.com/smart-bit-me/scomp-agent/internal/auth"
+	"github.com/smart-bit-me/scomp-agent/internal/pty"
 	"github.com/smart-bit-me/scomp-agent/internal/sessions"
 	"github.com/smart-bit-me/scomp-agent/internal/tmuxsess"
 	"github.com/smart-bit-me/scomp-agent/protocol"
@@ -316,6 +317,20 @@ func runAgent(serverURL, uid string, key ed25519.PrivateKey, reg *sessions.Regis
 		}
 	}
 
+	// sendWait blocks until msg is queued or the connection is torn down. The
+	// session forwarders use it so a burst of snapshot chunks cannot overflow
+	// the queue for other sessions; the writer always drains it under a write
+	// deadline, so this cannot wedge.
+	sendWait := func(msg protocol.AgentMsg) bool {
+		data, _ := json.Marshal(msg)
+		select {
+		case sendCh <- data:
+			return true
+		case <-connDone:
+			return false
+		}
+	}
+
 	sendSessionAdd := func(id, cmd string, created time.Time, mode sessions.SessionMode, active bool, cols, rows uint16) {
 		send(protocol.AgentMsg{
 			Type:      "session_add",
@@ -335,20 +350,26 @@ func runAgent(serverURL, uid string, key ed25519.PrivateKey, reg *sessions.Regis
 	modes := make(map[string]sessions.SessionMode)
 	sessionEnded := make(chan string, 64)
 
+	// forwarders maps an active session to its forwarder's event stream. It is
+	// owned by this function's main loop (startForwarder and requestSnapshot
+	// only run there).
+	forwarders := make(map[string]chan<- pty.Event)
+
 	startForwarder := func(id string) {
 		sess, ok := reg.Get(id)
 		if !ok {
 			return
 		}
-		outputCh := make(chan []byte, 256)
-		sess.Subscribe((chan<- []byte)(outputCh), func() {
+		outputCh := make(chan pty.Event, 256)
+		sess.Subscribe(outputCh, func() {
 			closeConnection(fmt.Errorf("PTY output subscriber too slow"))
 		})
+		forwarders[id] = outputCh
 
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			defer sess.Unsubscribe((chan<- []byte)(outputCh))
+			defer sess.Unsubscribe(outputCh)
 			for {
 				select {
 				case <-connDone:
@@ -360,15 +381,44 @@ func runAgent(serverURL, uid string, key ed25519.PrivateKey, reg *sessions.Regis
 					case <-connDone:
 					}
 					return
-				case data := <-outputCh:
-					send(protocol.AgentMsg{
+				case ev := <-outputCh:
+					// Output and snapshots for this session leave through this
+					// one goroutine in stream order, so a snapshot batch is never
+					// interleaved with the session's live output.
+					// Both wait for queue space: backpressure then reaches the
+					// bounded PTY subscriber channel, whose overflow reconnects.
+					if ev.Snapshot {
+						sendSnapshot(id, ev.ClientID, ev.Data, sendWait)
+						continue
+					}
+					sendWait(protocol.AgentMsg{
 						Type:      "output",
 						SessionID: id,
-						Data:      base64.StdEncoding.EncodeToString(data),
+						Data:      base64.StdEncoding.EncodeToString(ev.Data),
 					})
 				}
 			}
 		}()
+	}
+
+	// requestSnapshot answers client_attach. For an active session the ring is
+	// captured inside the PTY's output path and queued on the session's
+	// forwarder, so the snapshot sits at an exact point of the session's output
+	// stream: it contains everything sent before it and nothing sent after.
+	// A session with no PTY has emitted nothing, so its snapshot is empty.
+	requestSnapshot := func(sessionID, clientID string) {
+		sess, active := reg.Get(sessionID)
+		events, forwarding := forwarders[sessionID]
+		if !active || !forwarding {
+			sendSnapshot(sessionID, clientID, nil, func(msg protocol.AgentMsg) bool {
+				send(msg)
+				return true
+			})
+			return
+		}
+		if !sess.RequestSnapshot(events, clientID) {
+			closeConnection(fmt.Errorf("PTY output subscriber too slow"))
+		}
 	}
 
 	lazyMap := make(map[string]*lazySession, len(lazy))
@@ -411,7 +461,7 @@ func runAgent(serverURL, uid string, key ed25519.PrivateKey, reg *sessions.Regis
 					return fmt.Errorf("connection closed")
 				}
 			}
-			handleServerMsg(msg, reg, modes, lazyMap, send, sendSessionAdd, startForwarder)
+			handleServerMsg(msg, reg, modes, lazyMap, send, sendSessionAdd, startForwarder, requestSnapshot)
 
 		case change := <-sessionChanges:
 			if change.removeID != "" {
@@ -431,6 +481,7 @@ func runAgent(serverURL, uid string, key ed25519.PrivateKey, reg *sessions.Regis
 
 		case id := <-sessionEnded:
 			delete(modes, id)
+			delete(forwarders, id)
 			ls, ok := restoreLazySession(id, availableLazy, lazyMap)
 			if !ok {
 				continue
@@ -544,6 +595,7 @@ func handleServerMsg(
 	send func(protocol.AgentMsg),
 	sendSessionAdd func(id, cmd string, created time.Time, mode sessions.SessionMode, active bool, cols, rows uint16),
 	startForwarder func(id string),
+	requestSnapshot func(sessionID, clientID string),
 ) {
 	switch msg.Type {
 	case "input":
@@ -598,13 +650,7 @@ func handleServerMsg(
 			}
 			delete(lazyMap, ls.id)
 		}
-		snap := reg.Snapshot(msg.SessionID)
-		send(protocol.AgentMsg{
-			Type:      "snapshot",
-			SessionID: msg.SessionID,
-			ClientID:  msg.ClientID,
-			Data:      base64.StdEncoding.EncodeToString(snap),
-		})
+		requestSnapshot(msg.SessionID, msg.ClientID)
 
 	case "pair_request":
 		// A signed-in browser asked to link this host. Prompt on the terminal;
@@ -613,6 +659,32 @@ func handleServerMsg(
 		// goroutine so the blocking stdin read does not stall the read loop.
 		go promptPairPIN(msg.PairID, send)
 	}
+}
+
+// sendSnapshot emits one attach replay as snapshot_start, ordered
+// snapshot_chunk messages of at most protocol.SnapshotChunkBytes raw bytes
+// (seq 1..n), and snapshot_end carrying the final seq. It stops early if enqueue
+// fails; the relay then times the client out instead of replaying a partial
+// history.
+func sendSnapshot(sessionID, clientID string, data []byte, enqueue func(protocol.AgentMsg) bool) {
+	if !enqueue(protocol.AgentMsg{Type: "snapshot_start", SessionID: sessionID, ClientID: clientID, Total: len(data)}) {
+		return
+	}
+	var seq uint32
+	for offset := 0; offset < len(data); offset += protocol.SnapshotChunkBytes {
+		seq++
+		chunk := data[offset:min(offset+protocol.SnapshotChunkBytes, len(data))]
+		if !enqueue(protocol.AgentMsg{
+			Type:      "snapshot_chunk",
+			SessionID: sessionID,
+			ClientID:  clientID,
+			Seq:       seq,
+			Data:      base64.StdEncoding.EncodeToString(chunk),
+		}) {
+			return
+		}
+	}
+	enqueue(protocol.AgentMsg{Type: "snapshot_end", SessionID: sessionID, ClientID: clientID, Seq: seq})
 }
 
 // pairInProgress ensures only one terminal PIN prompt is active at a time, even

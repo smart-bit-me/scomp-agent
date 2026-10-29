@@ -73,6 +73,7 @@ func TestHandleResizeHonorsMode(t *testing.T) {
 				func(protocol.AgentMsg) {},
 				func(string, string, time.Time, sessions.SessionMode, bool, uint16, uint16) {},
 				func(string) {},
+				func(string, string) {},
 			)
 
 			if saw := waitForOutput("45 123", time.Second); saw != tt.resized {

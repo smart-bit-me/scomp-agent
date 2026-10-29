@@ -88,6 +88,15 @@ func (t *modeTracker) transformInput(data []byte) []byte {
 	return data
 }
 
+// Event is one item of a subscriber's ordered output stream: either live PTY
+// output or, when Snapshot is set, the ring contents captured for ClientID at
+// exactly that point of the stream (see RequestSnapshot).
+type Event struct {
+	Data     []byte
+	Snapshot bool
+	ClientID string
+}
+
 // Session wraps a PTY-backed process and fans out its output to subscribers.
 type Session struct {
 	Cmd string
@@ -96,12 +105,16 @@ type Session struct {
 	cmd  *exec.Cmd
 	mu   sync.Mutex // guards Resize
 
+	// streamMu makes "append to the ring, then broadcast" one atomic step
+	// with respect to RequestSnapshot, so every subscriber stream has a
+	// single well-defined position for each snapshot.
+	streamMu  sync.Mutex
 	ring      *ring.Buffer
 	tracker   modeTracker
 	trackerMu sync.RWMutex // guards tracker
 
 	subsMu sync.RWMutex
-	subs   map[chan<- []byte]func()
+	subs   map[chan<- Event]func()
 
 	readOnce  sync.Once
 	closeOnce sync.Once
@@ -122,7 +135,7 @@ func New(shellCmd string, args []string, cols, rows uint16) (*Session, error) {
 		ptmx: ptmx,
 		cmd:  cmd,
 		ring: ring.New(ring.DefaultSize),
-		subs: make(map[chan<- []byte]func()),
+		subs: make(map[chan<- Event]func()),
 		done: make(chan struct{}),
 	}
 	s.startReadLoop()
@@ -141,11 +154,7 @@ func (s *Session) readLoop() {
 		if n > 0 {
 			data := make([]byte, n)
 			copy(data, buf[:n])
-			s.ring.Write(data)
-			s.trackerMu.Lock()
-			s.tracker.process(data)
-			s.trackerMu.Unlock()
-			s.broadcast(data)
+			s.emit(data)
 		}
 		if err != nil {
 			return
@@ -153,16 +162,28 @@ func (s *Session) readLoop() {
 	}
 }
 
+// emit records one PTY read in the ring and broadcasts it to subscribers.
+func (s *Session) emit(data []byte) {
+	s.trackerMu.Lock()
+	s.tracker.process(data)
+	s.trackerMu.Unlock()
+	s.streamMu.Lock()
+	s.ring.Write(data)
+	s.broadcast(data)
+	s.streamMu.Unlock()
+}
+
+// broadcast delivers live output to every subscriber. Callers hold streamMu.
 func (s *Session) broadcast(data []byte) {
 	s.subsMu.RLock()
-	subs := make(map[chan<- []byte]func(), len(s.subs))
+	subs := make(map[chan<- Event]func(), len(s.subs))
 	for ch, overflow := range s.subs {
 		subs[ch] = overflow
 	}
 	s.subsMu.RUnlock()
 	for ch, overflow := range subs {
 		select {
-		case ch <- data:
+		case ch <- Event{Data: data}:
 		default:
 			// A missing terminal frame corrupts the subscriber's rendered state.
 			// Signal overload so the transport reconnects and obtains a fresh
@@ -174,13 +195,13 @@ func (s *Session) broadcast(data []byte) {
 	}
 }
 
-func (s *Session) Subscribe(ch chan<- []byte, overflow func()) {
+func (s *Session) Subscribe(ch chan<- Event, overflow func()) {
 	s.subsMu.Lock()
 	s.subs[ch] = overflow
 	s.subsMu.Unlock()
 }
 
-func (s *Session) Unsubscribe(ch chan<- []byte) {
+func (s *Session) Unsubscribe(ch chan<- Event) {
 	s.subsMu.Lock()
 	delete(s.subs, ch)
 	s.subsMu.Unlock()
@@ -200,6 +221,23 @@ func (s *Session) Resize(cols, rows uint16) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return cpty.Setsize(s.ptmx, &cpty.Winsize{Rows: rows, Cols: cols})
+}
+
+// RequestSnapshot queues on ch, a channel registered with Subscribe, a
+// snapshot event for clientID carrying the ring contents at this exact point
+// of the output stream. The ring write and the broadcast happen under the same
+// lock, so the snapshot holds exactly the output broadcast to ch before the
+// event (bounded by the ring size) and none of the output broadcast after it.
+// It reports false, without blocking, when ch is full.
+func (s *Session) RequestSnapshot(ch chan<- Event, clientID string) bool {
+	s.streamMu.Lock()
+	defer s.streamMu.Unlock()
+	select {
+	case ch <- Event{Data: s.ring.Snapshot(), Snapshot: true, ClientID: clientID}:
+		return true
+	default:
+		return false
+	}
 }
 
 // Snapshot returns the ring buffer contents for replay on reconnect.
