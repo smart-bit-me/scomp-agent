@@ -386,18 +386,7 @@ func runAgent(serverURL, uid string, key ed25519.PrivateKey, reg *sessions.Regis
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		defer close(readCh)
-		for {
-			_, raw, err := conn.ReadMessage()
-			if err != nil {
-				closeConnection(fmt.Errorf("read: %w", err))
-				return
-			}
-			var msg protocol.ServerMsg
-			if err := json.Unmarshal(raw, &msg); err == nil {
-				readCh <- msg
-			}
-		}
+		readServerMessages(conn, readCh, connDone, closeConnection)
 	}()
 
 	for {
@@ -444,6 +433,39 @@ func runAgent(serverURL, uid string, key ed25519.PrivateKey, reg *sessions.Regis
 			// not the underlying Screen session. Re-advertise the stable catalog
 			// entry as inactive so it remains attachable from Android/web.
 			sendSessionAdd(ls.id, ls.cmd, ls.created, ls.mode, false, 0, 0)
+		}
+	}
+}
+
+type messageReader interface {
+	ReadMessage() (messageType int, p []byte, err error)
+}
+
+// readServerMessages decodes relay messages into readCh until the connection
+// fails or connDone closes, then closes readCh. Delivery selects on connDone:
+// once teardown starts the main loop stops draining readCh, and a blocking
+// send into a full channel would deadlock its wg.Wait().
+func readServerMessages(
+	conn messageReader,
+	readCh chan<- protocol.ServerMsg,
+	connDone <-chan struct{},
+	closeConnection func(error),
+) {
+	defer close(readCh)
+	for {
+		_, raw, err := conn.ReadMessage()
+		if err != nil {
+			closeConnection(fmt.Errorf("read: %w", err))
+			return
+		}
+		var msg protocol.ServerMsg
+		if err := json.Unmarshal(raw, &msg); err != nil {
+			continue
+		}
+		select {
+		case readCh <- msg:
+		case <-connDone:
+			return
 		}
 	}
 }
