@@ -1,7 +1,9 @@
 package protocol
 
 import (
+	"encoding/base64"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 )
@@ -70,4 +72,40 @@ func contains(s, sub string) bool {
 		}
 		return false
 	}()
+}
+
+func TestSnapshotChunkFieldsRoundtrip(t *testing.T) {
+	for _, orig := range []AgentMsg{
+		{Type: "snapshot_start", SessionID: "s", ClientID: "c1", Total: 1 << 20},
+		{Type: "snapshot_chunk", SessionID: "s", ClientID: "c1", Seq: 22, Data: "AAAA"},
+		{Type: "snapshot_end", SessionID: "s", ClientID: "c1", Seq: 22},
+	} {
+		b, err := json.Marshal(orig)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got AgentMsg
+		if err := json.Unmarshal(b, &got); err != nil {
+			t.Fatal(err)
+		}
+		if got != orig {
+			t.Fatalf("roundtrip %s = %+v, want %+v", orig.Type, got, orig)
+		}
+	}
+}
+
+func TestMaxSnapshotChunkStaysNear64KiB(t *testing.T) {
+	b, err := json.Marshal(AgentMsg{
+		Type:      "snapshot_chunk",
+		SessionID: strings.Repeat("s", 128),
+		ClientID:  strings.Repeat("c", 128),
+		Seq:       ^uint32(0),
+		Data:      base64.StdEncoding.EncodeToString(make([]byte, SnapshotChunkBytes)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(b) > 66<<10 {
+		t.Fatalf("max snapshot_chunk = %d bytes, want <= 66 KiB", len(b))
+	}
 }
