@@ -703,6 +703,7 @@ func handleServerMsg(msg protocol.ServerMsg, env *serverMsgEnv) {
 				}
 				if err := ls.activate(cols, rows); err != nil {
 					log.Printf("activate %s (%s): %v", ls.cmd, ls.id, err)
+					rejectAttach(env, ls, msg.ClientID)
 					return
 				}
 				modes[ls.id] = ls.mode
@@ -723,6 +724,22 @@ func handleServerMsg(msg protocol.ServerMsg, env *serverMsgEnv) {
 		if env.pairRequest != nil {
 			env.pairRequest(msg.PairID)
 		}
+	}
+}
+
+// rejectAttach answers an attach whose lazy session failed to activate, so
+// the client is closed at once ("session ended") instead of waiting for the
+// relay's snapshot timeout: an empty snapshot completes the client's replay,
+// session_remove makes the relay close the session's clients, and the entry
+// is re-advertised inactive so it stays listed and can be attached again.
+func rejectAttach(env *serverMsgEnv, ls *lazySession, clientID string) {
+	sendSnapshot(ls.id, clientID, nil, func(msg protocol.AgentMsg) bool {
+		env.send(msg)
+		return true
+	})
+	env.send(protocol.AgentMsg{Type: "session_remove", SessionID: ls.id})
+	if env.sendSessionAdd != nil {
+		env.sendSessionAdd(ls.id, ls.cmd, ls.created, ls.mode, false, 0, 0)
 	}
 }
 

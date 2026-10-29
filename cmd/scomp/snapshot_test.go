@@ -3,7 +3,10 @@ package main
 import (
 	"bytes"
 	"encoding/base64"
+	"fmt"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/smart-bit-me/scomp-agent/internal/sessions"
 	"github.com/smart-bit-me/scomp-agent/protocol"
@@ -71,5 +74,48 @@ func TestClientAttachRequestsSnapshotForTheClient(t *testing.T) {
 	)
 	if gotSession != "missing" || gotClient != "c9" {
 		t.Fatalf("requestSnapshot(%q, %q)", gotSession, gotClient)
+	}
+}
+
+// TestFailedActivationEndsTheAttachPromptly: when a lazy session cannot be
+// activated, the attaching client gets an empty snapshot and the session is
+// removed (the relay closes its clients with "session ended") and listed
+// again as inactive, instead of the client waiting for the snapshot timeout.
+func TestFailedActivationEndsTheAttachPromptly(t *testing.T) {
+	var sent []protocol.AgentMsg
+	var readded []string
+	lazy := map[string]*lazySession{"lazy": {
+		id: "lazy", cmd: "tmux:work", mode: sessions.ModeReadonly,
+		activate: func(uint16, uint16) error { return fmt.Errorf("tmux attach failed") },
+	}}
+	handleServerMsg(
+		protocol.ServerMsg{Type: "client_attach", SessionID: "lazy", ClientID: "c1"},
+		&serverMsgEnv{
+			reg: sessions.New(), modes: map[string]sessions.SessionMode{}, lazyMap: lazy,
+			send: func(msg protocol.AgentMsg) { sent = append(sent, msg) },
+			sendSessionAdd: func(id, cmd string, _ time.Time, _ sessions.SessionMode, active bool, _, _ uint16) {
+				if active {
+					t.Errorf("failed session re-advertised as active")
+				}
+				readded = append(readded, id)
+			},
+			requestSnapshot: func(string, string) { t.Error("snapshot requested for a failed activation") },
+		},
+	)
+	var types []string
+	for _, msg := range sent {
+		types = append(types, msg.Type)
+		if msg.SessionID != "lazy" || (msg.Type != "session_remove" && msg.ClientID != "c1") || msg.Total != 0 || msg.Seq != 0 {
+			t.Fatalf("unexpected message %+v", msg)
+		}
+	}
+	if strings.Join(types, ",") != "snapshot_start,snapshot_end,session_remove" {
+		t.Fatalf("sent %v", types)
+	}
+	if len(readded) != 1 || readded[0] != "lazy" {
+		t.Fatalf("re-advertised %v", readded)
+	}
+	if lazy["lazy"] == nil {
+		t.Fatal("failed lazy session was dropped and cannot be retried")
 	}
 }
