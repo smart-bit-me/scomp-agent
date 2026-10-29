@@ -71,3 +71,48 @@ func TestRestoreLazySessionDoesNotReviveRemovedCatalogEntry(t *testing.T) {
 		t.Fatalf("unexpected lazy sessions: %#v", lazy)
 	}
 }
+
+func TestInputAllowed(t *testing.T) {
+	tests := []struct {
+		name string
+		mode sessions.SessionMode
+		data string
+		want bool
+	}{
+		{"full arbitrary", sessions.ModeFull, "rm -rf ~\r", true},
+		{"full empty", sessions.ModeFull, "", true},
+		{"approved accepted", sessions.ModeApproved, "y\r", true},
+		{"approved rejected", sessions.ModeApproved, "ls\r", false},
+		{"readonly approved seq", sessions.ModeReadonly, "y\r", false},
+		{"readonly arbitrary", sessions.ModeReadonly, "ls\r", false},
+		{"missing mode", "", "\r", false},
+		{"missing mode arbitrary", "", "ls\r", false},
+		{"unknown mode", sessions.SessionMode("FULL"), "ls\r", false},
+		{"unknown mode approved seq", sessions.SessionMode("approved"), "y\r", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := inputAllowed(tt.mode, []byte(tt.data)); got != tt.want {
+				t.Fatalf("inputAllowed(%q, %q) = %v, want %v", tt.mode, tt.data, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIsApproved(t *testing.T) {
+	accepted := []string{"y\r", "y\n", "n\r", "n\n", "\x03", "\r", "\t", "\x1b"}
+	rejected := []string{
+		"", "\n", "\r\n", "y", "n", "Y\r", "N\n", "\t\t", "\x03\x03", "yes\r",
+		"\x1b[A", "\x1b[B", "\x1b[C", "\x1b[D", "\x1bOA", "\x1b\r", "y\r\n",
+	}
+	for _, s := range accepted {
+		if !isApproved([]byte(s)) {
+			t.Errorf("isApproved(%q) = false, want true", s)
+		}
+	}
+	for _, s := range rejected {
+		if isApproved([]byte(s)) {
+			t.Errorf("isApproved(%q) = true, want false", s)
+		}
+	}
+}

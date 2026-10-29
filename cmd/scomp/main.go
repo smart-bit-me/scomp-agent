@@ -487,14 +487,13 @@ func handleServerMsg(
 		if !ok {
 			return
 		}
-		if modes[msg.SessionID] == sessions.ModeReadonly {
-			return
-		}
 		data, err := base64.StdEncoding.DecodeString(msg.Data)
 		if err != nil {
 			return
 		}
-		if modes[msg.SessionID] == sessions.ModeApproved && !isApproved(data) {
+		// A session missing from modes (e.g. mid-rename or exit) yields the
+		// empty mode, which inputAllowed rejects.
+		if !inputAllowed(modes[msg.SessionID], data) {
 			return
 		}
 		sess.Write(data)
@@ -585,6 +584,21 @@ func newSessionID() string {
 		log.Fatalf("generating session id: %v", err)
 	}
 	return hex.EncodeToString(b)
+}
+
+// inputAllowed reports whether remote input may be written to a session in the
+// given mode. It fails closed: only full mode passes arbitrary input, and
+// approved-only passes the approved sequences; readonly, empty (session not in
+// the mode table), and unknown modes drop everything.
+func inputAllowed(mode sessions.SessionMode, data []byte) bool {
+	switch mode {
+	case sessions.ModeFull:
+		return true
+	case sessions.ModeApproved:
+		return isApproved(data)
+	default:
+		return false
+	}
 }
 
 var approvedSequences = [][]byte{
