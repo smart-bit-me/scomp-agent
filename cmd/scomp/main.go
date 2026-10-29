@@ -11,6 +11,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -71,7 +72,10 @@ func main() {
 
 	log.Printf("scomp %s starting", version)
 
-	configDir := filepath.Join(os.Getenv("HOME"), ".config", "scomp")
+	configDir, err := agentConfigDir()
+	if err != nil {
+		log.Fatal(err)
+	}
 	uid, err := auth.LoadOrCreateUID(configDir)
 	if err != nil {
 		log.Fatalf("uid: %v", err)
@@ -134,6 +138,20 @@ func main() {
 		}
 		time.Sleep(5 * time.Second)
 	}
+}
+
+// agentConfigDir locates the identity directory: $HOME/.config/scomp, as
+// always, or the OS user config directory when HOME is unusable. A relative
+// result would silently put the UID and private key under the working
+// directory, so that is an error instead.
+func agentConfigDir() (string, error) {
+	if home, err := os.UserHomeDir(); err == nil && filepath.IsAbs(home) {
+		return filepath.Join(home, ".config", "scomp"), nil
+	}
+	if dir, err := os.UserConfigDir(); err == nil && filepath.IsAbs(dir) {
+		return filepath.Join(dir, "scomp"), nil
+	}
+	return "", errors.New("cannot locate the scomp config directory: set HOME to an absolute path")
 }
 
 func parseSessionMode(value string) (sessions.SessionMode, error) {
