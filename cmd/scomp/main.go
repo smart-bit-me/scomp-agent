@@ -629,6 +629,9 @@ func handleServerMsg(
 		}
 
 	case "client_attach":
+		// cols/rows only size a lazy session's new PTY. Attaching never resizes
+		// an existing PTY, and 0 (sent for read-only clients) means "no size
+		// preference": use the default only when the PTY must be created.
 		if ls, ok := lazyMap[msg.SessionID]; ok {
 			if _, already := reg.Get(ls.id); !already {
 				cols, rows := msg.Cols, msg.Rows

@@ -79,7 +79,10 @@ type AgentMsg struct {
 //     private key and reply with an "auth" AgentMsg (F3)
 //   - "input"          — keyboard bytes for a session (session_id, data base64)
 //   - "resize"         — terminal resize (session_id, cols, rows)
-//   - "client_attach"  — browser just connected to session (session_id, client_id)
+//   - "client_attach"  — browser just connected to session (session_id, client_id,
+//     cols, rows); the agent answers with a snapshot batch. cols/rows only
+//     size a lazy session's new PTY and are 0 for read-only clients; an
+//     attach never resizes an existing PTY
 //   - "client_detach"  — browser disconnected from session (session_id, client_id)
 //   - "pair_request"   — ask the agent to prompt for a pairing PIN at its terminal
 //     (pair_id); the user types the PIN shown in their browser

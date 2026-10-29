@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -80,5 +81,64 @@ func TestHandleResizeHonorsMode(t *testing.T) {
 				t.Fatalf("resized = %v, want %v (output %q)", saw, tt.resized, reg.Snapshot(info.ID))
 			}
 		})
+	}
+}
+
+func TestClientAttachSizeOnlyActivatesLazySessions(t *testing.T) {
+	tests := []struct {
+		name             string
+		cols, rows       uint16
+		wantCols, wantRo uint16
+	}{
+		{"read-only attach uses default", 0, 0, 80, 24},
+		{"writer attach sizes new PTY", 132, 40, 132, 40},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var gotCols, gotRows uint16
+			lazy := map[string]*lazySession{"lazy": {
+				id: "lazy", mode: sessions.ModeReadonly,
+				activate: func(cols, rows uint16) error {
+					gotCols, gotRows = cols, rows
+					return fmt.Errorf("stop after recording the size")
+				},
+			}}
+			handleServerMsg(
+				protocol.ServerMsg{Type: "client_attach", SessionID: "lazy", ClientID: "c1", Cols: tt.cols, Rows: tt.rows},
+				sessions.New(), map[string]sessions.SessionMode{}, lazy,
+				func(protocol.AgentMsg) {}, nil, nil, func(string, string) {},
+			)
+			if gotCols != tt.wantCols || gotRows != tt.wantRo {
+				t.Fatalf("activate(%d, %d), want (%d, %d)", gotCols, gotRows, tt.wantCols, tt.wantRo)
+			}
+		})
+	}
+}
+
+// TestClientAttachNeverResizesActivePTY attaches to a running full-mode PTY
+// with a size and checks the PTY keeps its original dimensions.
+func TestClientAttachNeverResizesActivePTY(t *testing.T) {
+	reg := sessions.New()
+	info, _, err := reg.Create("sh", []string{"-c", "while :; do stty size; sleep 0.05; done"}, 80, 24)
+	if err != nil {
+		t.Skipf("cannot start PTY: %v", err)
+	}
+	t.Cleanup(func() { reg.Remove(info.ID) })
+	deadline := time.Now().Add(5 * time.Second)
+	for !strings.Contains(string(reg.Snapshot(info.ID)), "24 80") {
+		if time.Now().After(deadline) {
+			t.Fatalf("PTY never reported its initial size: %q", reg.Snapshot(info.ID))
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	modes := map[string]sessions.SessionMode{info.ID: sessions.ModeFull}
+	handleServerMsg(
+		protocol.ServerMsg{Type: "client_attach", SessionID: info.ID, ClientID: "c1", Cols: 123, Rows: 45},
+		reg, modes, map[string]*lazySession{},
+		func(protocol.AgentMsg) {}, nil, nil, func(string, string) {},
+	)
+	time.Sleep(300 * time.Millisecond)
+	if out := string(reg.Snapshot(info.ID)); strings.Contains(out, "45 123") {
+		t.Fatalf("attach changed the PTY size: %q", out)
 	}
 }
