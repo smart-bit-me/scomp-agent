@@ -20,6 +20,13 @@ type sessionChange struct {
 // sessionCatalog keeps stable IDs for discovered multiplexer sessions and
 // publishes lifecycle changes to the currently connected relay client.
 type sessionCatalog struct {
+	// scanMu serializes whole scans. Each scan lists sessions before taking
+	// mu, so without it a slow scan that listed a session before it exited
+	// could apply after a newer scan removed it and resurrect it under a
+	// new ID.
+	scanMu          sync.Mutex
+	listTmux        func() []tmuxsess.Session
+	listScreen      func() []screensess.Session
 	mu              sync.Mutex
 	reg             *sessions.Registry
 	mode            sessions.SessionMode
@@ -39,6 +46,8 @@ func newSessionCatalog(
 		onTmuxActivated: onTmuxActivated,
 		entries:         make(map[string]lazySession),
 		subscribers:     make(map[chan sessionChange]struct{}),
+		listTmux:        tmuxsess.List,
+		listScreen:      screensess.List,
 	}
 	c.scan(false)
 	return c
@@ -47,8 +56,10 @@ func newSessionCatalog(
 // scan reconciles the catalog against tmux and screen. Calls are event-driven
 // by fsnotify and tmux control mode; there is no timer or periodic polling.
 func (c *sessionCatalog) scan(notify bool) {
-	tmuxNow := tmuxsess.List()
-	screenNow := screensess.List()
+	c.scanMu.Lock()
+	defer c.scanMu.Unlock()
+	tmuxNow := c.listTmux()
+	screenNow := c.listScreen()
 	present := make(map[string]bool, len(tmuxNow)+len(screenNow))
 
 	c.mu.Lock()
