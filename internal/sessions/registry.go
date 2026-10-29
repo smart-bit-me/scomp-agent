@@ -60,9 +60,9 @@ func sourceKey(cmd string, args []string) string {
 	}
 	switch base {
 	case "tmux":
-		// tmux attach-session -t <name>
+		// tmux attach-session -t [=]<name>
 		if len(args) >= 3 && args[0] == "attach-session" && args[1] == "-t" {
-			return "tmux:" + args[2]
+			return "tmux:" + strings.TrimPrefix(args[2], "=")
 		}
 		// tmux new-session -A -t <target> -s <linked-name>
 		if len(args) > 0 && args[0] == "new-session" {

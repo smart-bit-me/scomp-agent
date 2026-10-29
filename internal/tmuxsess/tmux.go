@@ -67,14 +67,31 @@ func parseOutput(out string) []Session {
 	return result
 }
 
+// ExactTarget returns a -t target-session that matches only the session named
+// exactly name. Without the "=" prefix tmux falls back to prefix and fnmatch
+// matching, so a stale "X" could resolve to "Xprod".
+func ExactTarget(name string) string {
+	return "=" + name
+}
+
+// LinkedSessionName is the name of the agent-owned session grouped with name.
+func LinkedSessionName(name string) string {
+	return sccompPrefix + name
+}
+
 // AttachArgs returns args to attach to an existing tmux session.
 func AttachArgs(name string) (string, []string) {
-	return "tmux", []string{"attach-session", "-t", name}
+	return "tmux", []string{"attach-session", "-t", ExactTarget(name)}
 }
 
 // LinkedSessionArgs creates (or reattaches to) a session in the same window
-// group as name but with independent dimensions.
+// group as name but with independent dimensions. -s is always an exact name.
 func LinkedSessionArgs(name string) (string, []string) {
-	linked := sccompPrefix + name
-	return "tmux", []string{"new-session", "-A", "-t", name, "-s", linked}
+	return "tmux", []string{"new-session", "-A", "-t", ExactTarget(name), "-s", LinkedSessionName(name)}
+}
+
+// KillLinkedSession kills the agent-owned session linked to name, and never a
+// different session whose name merely starts with it.
+func KillLinkedSession(name string) error {
+	return exec.Command("tmux", "kill-session", "-t", ExactTarget(LinkedSessionName(name))).Run()
 }

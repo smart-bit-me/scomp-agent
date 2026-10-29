@@ -55,3 +55,10 @@ func TestSourceKey_FullPath(t *testing.T) {
 		t.Fatalf("got %q, want tmux:dev", key)
 	}
 }
+
+func TestSourceKeyTmuxExactTarget(t *testing.T) {
+	key := sourceKey("tmux", []string{"attach-session", "-t", "=main"})
+	if key != "tmux:main" {
+		t.Fatalf("got %q, want tmux:main", key)
+	}
+}

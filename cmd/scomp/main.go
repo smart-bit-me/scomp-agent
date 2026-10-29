@@ -16,7 +16,6 @@ import (
 	"log"
 	"net/url"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
@@ -30,6 +29,7 @@ import (
 
 	"github.com/smart-bit-me/scomp-agent/internal/auth"
 	"github.com/smart-bit-me/scomp-agent/internal/sessions"
+	"github.com/smart-bit-me/scomp-agent/internal/tmuxsess"
 	"github.com/smart-bit-me/scomp-agent/protocol"
 )
 
@@ -101,8 +101,8 @@ func main() {
 		names := append([]string(nil), activatedTmux...)
 		activatedTmuxMu.Unlock()
 		for _, name := range names {
-			linked := "scomp-" + name
-			if err := exec.Command("tmux", "kill-session", "-t", linked).Run(); err != nil {
+			linked := tmuxsess.LinkedSessionName(name)
+			if err := tmuxsess.KillLinkedSession(name); err != nil {
 				log.Printf("kill tmux session %s: %v", linked, err)
 			} else {
 				log.Printf("killed tmux session %s", linked)

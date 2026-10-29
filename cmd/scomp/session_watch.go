@@ -116,7 +116,7 @@ func monitorTmuxSessions(ctx context.Context, target string, changed chan<- stru
 		"-C",
 		"attach-session",
 		"-f", "read-only,ignore-size,no-output,no-detach-on-destroy",
-		"-t", target,
+		"-t", tmuxsess.ExactTarget(target),
 	)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {

@@ -2,7 +2,6 @@ package main
 
 import (
 	"log"
-	"os/exec"
 	"sort"
 	"strings"
 	"sync"
@@ -140,7 +139,7 @@ func (c *sessionCatalog) scan(notify bool) {
 		}
 		c.reg.Remove(entry.id)
 		if strings.HasPrefix(entry.cmd, "tmux:") {
-			_ = exec.Command("tmux", "kill-session", "-t", "scomp-"+entry.cmd[len("tmux:"):]).Run()
+			_ = tmuxsess.KillLinkedSession(entry.cmd[len("tmux:"):])
 		}
 	}
 
