@@ -1,6 +1,6 @@
 module github.com/smart-bit-me/scomp-agent
 
-go 1.27.1
+go 1.27.2
 
 require (
 	github.com/creack/pty v1.1.24
@@ -9,4 +9,4 @@ require (
 	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
 )
 
-require golang.org/x/sys v0.13.0 // indirect
+require golang.org/x/sys v0.49.0 // indirect
