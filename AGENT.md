@@ -71,3 +71,6 @@ on the `production` environment and uses SHA-pinned actions.
 - `gofmt`-clean, `go vet`-clean, `make test` green, and `make build-all` green
   before opening a PR.
 - Branches: `dev` for active work, `main` for release; PRs target `dev` first.
+
+## Commit messages
+- Never add `Co-Authored-By`, "Generated with", or any other AI/tool attribution to commits or PR descriptions. `.claude/settings.json` disables Claude Code's attribution for this repo.
