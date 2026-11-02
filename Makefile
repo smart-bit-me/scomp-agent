@@ -14,8 +14,10 @@ build-all:
 
 # The hosted review instance: --mode fakeshell only, no PTY/tmux/Screen code
 # linked (see docs/FAKESHELL.md). verify-fakeshell proves it.
+# Static (CGO_ENABLED=0): scomp-demo.service allows executing only this binary
+# (NoExecPaths=/), so a dynamic build fails with 203/EXEC on the ELF loader.
 build-fakeshell:
-	go build -trimpath -tags fakeshellonly -ldflags="-s -w -X main.version=$(VERSION)" -o bin/$(BINARY)-fakeshell ./cmd/scomp
+	CGO_ENABLED=0 go build -trimpath -tags fakeshellonly -ldflags="-s -w -X main.version=$(VERSION)" -o bin/$(BINARY)-fakeshell ./cmd/scomp
 
 verify-fakeshell:
 	scripts/verify-fakeshell.sh
