@@ -78,8 +78,7 @@ Always run `gofmt -w` on touched files and `make test` before committing.
 
 ## Release
 
-Tags `vX.Y.Z` drive GitHub Actions (`release.yml`): it builds the four binaries
-plus `scomp-fakeshell-linux-{amd64,arm64}`,
+Tags `vX.Y.Z` drive GitHub Actions (`release.yml`): it builds the four binaries,
 attests provenance, and publishes them to a GitHub Release. The workflow is gated
 on the `production` environment and uses SHA-pinned actions.
 

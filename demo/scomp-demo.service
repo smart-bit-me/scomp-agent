@@ -1,7 +1,8 @@
 # scomp-demo.service — an always-on demo host for App Store / Google Play review.
 #
-# It runs the fakeshellonly agent build (`make build-fakeshell`, or the
-# scomp-fakeshell-linux-* release asset). That binary offers three simulated
+# It runs the fakeshellonly agent build, which is not published as a release
+# asset; build it from a release tag (`GOOS=linux GOARCH=amd64 make
+# build-fakeshell`, or arm64). That binary offers three simulated
 # sessions — shell, agent, logs — and links no PTY, tmux or Screen code, so
 # nothing a reviewer types can execute anything (see docs/FAKESHELL.md).
 # No tmux, bash or other package is needed on the host.
