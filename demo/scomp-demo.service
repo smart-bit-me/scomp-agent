@@ -8,18 +8,22 @@
 # No tmux, bash or other package is needed on the host.
 #
 # The sandbox below is defence in depth for the agent's own network code:
-# a throwaway user, a read-only system, no new executables, and daily resets
-# (RuntimeMaxSec).
+# an unprivileged system user, a read-only system, no new executables, and
+# daily resets (RuntimeMaxSec).
 #
-# Install:
+# Install (the user comes from sysusers.d, so it exists on the host even while
+# the service is stopped; pairing and file ownership rely on that):
 #   sudo install -m 0755 bin/scomp-fakeshell /usr/local/bin/scomp-fakeshell
 #   sudo restorecon -v /usr/local/bin/scomp-fakeshell     # SELinux hosts
-#   sudo cp demo/scomp-demo.service /etc/systemd/system/ && sudo systemctl daemon-reload
+#   sudo install -m 0644 demo/scomp-demo.sysusers /etc/sysusers.d/scomp-demo.conf
+#   sudo systemd-sysusers /etc/sysusers.d/scomp-demo.conf && id scomp-demo
+#   sudo install -d -o scomp-demo -g scomp-demo -m 0700 /var/lib/scomp-demo
+#   sudo install -m 0644 demo/scomp-demo.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
 #
-# Pair once with the review account (the agent asks for the PIN on stdin):
-#   sudo systemd-run --pty --wait -p DynamicUser=yes -p User=scomp-demo \
-#     -p StateDirectory=scomp-demo -E HOME=/var/lib/scomp-demo \
-#     /usr/local/bin/scomp-fakeshell
+# Pair once with the review account, as the same user and HOME as the service
+# (the agent asks for the PIN on stdin):
+#   sudo -u scomp-demo HOME=/var/lib/scomp-demo /usr/local/bin/scomp-fakeshell
 #   In the app, signed in as the review account: Pair -> enter the printed UID,
 #   then type the PIN into this terminal. Press Ctrl-C once it is paired.
 #   The identity is stored under /var/lib/scomp-demo/.config/scomp/fakeshell/.
@@ -34,8 +38,8 @@ After=network-online.target
 
 [Service]
 Type=simple
-DynamicUser=yes
 User=scomp-demo
+Group=scomp-demo
 StateDirectory=scomp-demo
 Environment=HOME=%S/scomp-demo
 WorkingDirectory=%S/scomp-demo
@@ -54,6 +58,7 @@ AmbientCapabilities=
 NoExecPaths=/
 ExecPaths=/usr/local/bin/scomp-fakeshell
 PrivateTmp=yes
+RemoveIPC=yes
 PrivateDevices=yes
 ProtectSystem=strict
 ProtectHome=yes
