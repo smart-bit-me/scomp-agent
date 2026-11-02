@@ -86,3 +86,16 @@ func TestConcurrent(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+func TestResetEmptiesBuffer(t *testing.T) {
+	b := New(4)
+	b.Write([]byte("abcdef"))
+	b.Reset()
+	if got := b.Snapshot(); got != nil {
+		t.Fatalf("snapshot after reset = %q, want nil", got)
+	}
+	b.Write([]byte("xy"))
+	if got := string(b.Snapshot()); got != "xy" {
+		t.Fatalf("snapshot = %q, want %q", got, "xy")
+	}
+}

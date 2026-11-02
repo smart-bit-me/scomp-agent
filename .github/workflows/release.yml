@@ -43,13 +43,32 @@ jobs:
             -o scomp-${{ matrix.goos }}-${{ matrix.goarch }} \
             ./cmd/scomp
 
+      - name: Build fakeshellonly variant
+        if: matrix.goos == 'linux'
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          go build -trimpath -tags fakeshellonly \
+            -ldflags="-s -w -X main.version=${REF_NAME}" \
+            -o scomp-fakeshell-${{ matrix.goos }}-${{ matrix.goarch }} \
+            ./cmd/scomp
+          scripts/verify-fakeshell.sh
+
       - name: Attest build provenance
         uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:
-          subject-path: scomp-${{ matrix.goos }}-${{ matrix.goarch }}
+          subject-path: |
+            scomp-${{ matrix.goos }}-${{ matrix.goarch }}
+            ${{ matrix.goos == 'linux' && format('scomp-fakeshell-{0}-{1}', matrix.goos, matrix.goarch) || '' }}
 
       - name: Checksum
-        run: sha256sum scomp-${{ matrix.goos }}-${{ matrix.goarch }} > scomp-${{ matrix.goos }}-${{ matrix.goarch }}.sha256
+        run: |
+          for f in scomp-*-${{ matrix.goos }}-${{ matrix.goarch }} scomp-${{ matrix.goos }}-${{ matrix.goarch }}; do
+            [ -f "$f" ] && sha256sum "$f" > "$f.sha256"
+          done
 
       - name: Upload binary and checksum to GitHub Release
         uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
@@ -57,6 +76,8 @@ jobs:
           files: |
             scomp-${{ matrix.goos }}-${{ matrix.goarch }}
             scomp-${{ matrix.goos }}-${{ matrix.goarch }}.sha256
+            scomp-fakeshell-${{ matrix.goos }}-${{ matrix.goarch }}
+            scomp-fakeshell-${{ matrix.goos }}-${{ matrix.goarch }}.sha256
 
   checksums:
     runs-on: ubuntu-latest

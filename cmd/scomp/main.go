@@ -6,7 +6,6 @@ package main
 import (
 	"context"
 	"crypto/ed25519"
-	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -27,9 +26,8 @@ import (
 	qrcode "github.com/skip2/go-qrcode"
 
 	"github.com/smart-bit-me/scomp-agent/internal/auth"
-	"github.com/smart-bit-me/scomp-agent/internal/pty"
 	"github.com/smart-bit-me/scomp-agent/internal/sessions"
-	"github.com/smart-bit-me/scomp-agent/internal/tmuxsess"
+	"github.com/smart-bit-me/scomp-agent/internal/stream"
 	"github.com/smart-bit-me/scomp-agent/protocol"
 )
 
@@ -58,7 +56,8 @@ const (
 
 func main() {
 	serverURL := flag.String("server", "wss://link.scomp.me/agent", "scomp-server WebSocket URL")
-	modeFlag := flag.String("mode", "readonly", "session mode: full | readonly | approved-only")
+	modeFlag := flag.String("mode", defaultModeFlag, "session mode: full | readonly | approved-only | fakeshell")
+	hostnameFlag := flag.String("hostname", "", "hostname shown in the apps (default: the OS hostname; review-host in fakeshell mode)")
 	noQR := flag.Bool("no-qr", false, "skip QR code, print URL only")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
@@ -70,9 +69,27 @@ func main() {
 
 	log.Printf("scomp %s starting", version)
 
+	fake := *modeFlag == "fakeshell"
+	var defaultMode sessions.SessionMode
+	if !fake {
+		var err error
+		if defaultMode, err = parseSessionMode(*modeFlag); err != nil {
+			log.Fatal(err)
+		}
+		// Refuse before touching any identity file.
+		if !multiplexerSupported {
+			log.Fatal("this scomp build supports only --mode fakeshell")
+		}
+	}
+
 	configDir, err := agentConfigDir()
 	if err != nil {
 		log.Fatal(err)
+	}
+	if fake {
+		// A separate identity: a fake host must never take over the UID and
+		// key of a real agent run by the same user.
+		configDir = filepath.Join(configDir, "fakeshell")
 	}
 	uid, err := auth.LoadOrCreateUID(configDir)
 	if err != nil {
@@ -82,61 +99,60 @@ func main() {
 	if err != nil {
 		log.Fatalf("key: %v", err)
 	}
-
-	defaultMode, err := parseSessionMode(*modeFlag)
-	if err != nil {
-		log.Fatal(err)
-	}
+	hostname := agentHostname(*hostnameFlag, fake)
 
 	reg := sessions.New()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
+	// The fake branch is taken before any multiplexer code is constructed;
+	// in a fakeshellonly build that code is not linked at all.
 	var (
-		activatedTmuxMu sync.Mutex
-		activatedTmux   []string
+		source  sessionSource
+		cleanup = func() {}
 	)
-	onTmuxActivated := func(name string) {
-		activatedTmuxMu.Lock()
-		activatedTmux = append(activatedTmux, name)
-		activatedTmuxMu.Unlock()
-	}
-	cleanupTmux := func() {
-		activatedTmuxMu.Lock()
-		names := append([]string(nil), activatedTmux...)
-		activatedTmuxMu.Unlock()
-		for _, name := range names {
-			linked := tmuxsess.LinkedSessionName(name)
-			if err := tmuxsess.KillLinkedSession(name); err != nil {
-				log.Printf("kill tmux session %s: %v", linked, err)
-			} else {
-				log.Printf("killed tmux session %s", linked)
-			}
+	if fake {
+		source = newFakeSource(reg, uid, hostname)
+		log.Printf("fakeshell mode: simulated sessions only, nothing typed is executed")
+	} else {
+		if source, cleanup, err = startMultiplexerSource(ctx, reg, defaultMode); err != nil {
+			log.Fatal(err)
 		}
 	}
-	defer cleanupTmux()
+	defer cleanup()
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-sigCh
-		cleanupTmux()
+		cleanup()
 		os.Exit(0)
 	}()
 
 	mobileURL := serverBaseURL(*serverURL) + "/?uid=" + uid
 	printBanner(uid, *serverURL, mobileURL, *noQR)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	catalog := newSessionCatalog(reg, defaultMode, onTmuxActivated)
-	go watchSessions(ctx, catalog)
-
 	prompter := newPairPrompter(os.Stdin, os.Stdout, pairPromptTTL)
 	for {
-		if err := runAgent(*serverURL, uid, key, reg, catalog, prompter); err != nil {
+		if err := runAgent(*serverURL, uid, hostname, key, reg, source, prompter); err != nil {
 			log.Printf("server disconnected (%v), retrying in 5s…", err)
 		}
 		time.Sleep(5 * time.Second)
 	}
+}
+
+// agentHostname is the name announced to the relay: the --hostname flag,
+// else review-host in fakeshell mode (never leak the real machine name to a
+// reviewer), else the OS hostname.
+func agentHostname(flagValue string, fake bool) string {
+	if flagValue != "" {
+		return flagValue
+	}
+	if fake {
+		return "review-host"
+	}
+	hostname, _ := os.Hostname()
+	return hostname
 }
 
 // agentConfigDir locates the identity directory: $HOME/.config/scomp, as
@@ -244,10 +260,10 @@ func answerChallenge(conn *websocket.Conn, key ed25519.PrivateKey) error {
 }
 
 func runAgent(
-	serverURL, uid string,
+	serverURL, uid, hostname string,
 	key ed25519.PrivateKey,
 	reg *sessions.Registry,
-	catalog *sessionCatalog,
+	source sessionSource,
 	prompter *pairPrompter,
 ) error {
 	conn, _, err := websocket.DefaultDialer.Dial(serverURL, nil)
@@ -259,7 +275,6 @@ func runAgent(
 	// and an unbounded ReadMessage would let a compromised relay OOM the agent.
 	conn.SetReadLimit(1 << 20) // 1 MiB
 
-	hostname, _ := os.Hostname()
 	hello, _ := json.Marshal(newAgentHello(uid, hostname, auth.PublicKeyHex(key)))
 	if err := conn.WriteMessage(websocket.TextMessage, hello); err != nil {
 		return err
@@ -276,8 +291,8 @@ func runAgent(
 	// reconnect. A long-running filesystem watcher can miss an event (for
 	// example after an overflow); without this refresh, a relay restart would
 	// receive that stale catalog until another socket event such as screen -rd.
-	catalog.scan(false)
-	lazy, sessionChanges, unsubscribe := catalog.snapshotAndSubscribe()
+	source.refresh()
+	lazy, sessionChanges, unsubscribe := source.snapshotAndSubscribe()
 	defer unsubscribe()
 
 	sendCh := make(chan []byte, 512)
@@ -404,7 +419,7 @@ func runAgent(
 		if !ok {
 			return
 		}
-		outputCh := make(chan pty.Event, 256)
+		outputCh := make(chan stream.Event, 256)
 		sess.Subscribe(outputCh, func() {
 			closeConnection(fmt.Errorf("PTY output subscriber too slow"))
 		})
@@ -590,7 +605,7 @@ func runAgent(
 // forwarder is one active session's output pump to the relay.
 type forwarder struct {
 	id     string
-	events chan pty.Event
+	events chan stream.Event
 	exited chan struct{} // closed once the goroutine stops sending
 }
 
@@ -816,16 +831,6 @@ func sendSnapshot(sessionID, clientID string, data []byte, enqueue func(protocol
 		}
 	}
 	enqueue(protocol.AgentMsg{Type: "snapshot_end", SessionID: sessionID, ClientID: clientID, Seq: seq})
-}
-
-func newSessionID() string {
-	// 16 bytes = 128 bits: avoids birthday collisions that a 32-bit ID would
-	// hit around a few thousand sessions (a collision misroutes input/attach).
-	b := make([]byte, 16)
-	if _, err := rand.Read(b); err != nil {
-		log.Fatalf("generating session id: %v", err)
-	}
-	return hex.EncodeToString(b)
 }
 
 // inputAllowed reports whether remote input may be written to a session in the

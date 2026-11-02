@@ -1,13 +1,10 @@
 package sessions
 
 import (
-	"crypto/rand"
-	"encoding/hex"
-	"strings"
 	"sync"
 	"time"
 
-	"github.com/smart-bit-me/scomp-agent/internal/pty"
+	"github.com/smart-bit-me/scomp-agent/internal/stream"
 )
 
 // SessionMode controls what input is permitted for a session.
@@ -26,9 +23,22 @@ type Info struct {
 	Mode    SessionMode `json:"mode,omitempty"`
 }
 
+// Terminal is a running session: a PTY-backed process or an in-process fake
+// terminal. Output is delivered through the embedded stream semantics.
+type Terminal interface {
+	Write(data []byte) error
+	Resize(cols, rows uint16) error
+	Subscribe(ch chan<- stream.Event, overflow func())
+	Unsubscribe(ch chan<- stream.Event)
+	RequestSnapshot(ch chan<- stream.Event, clientID string) bool
+	Snapshot() []byte
+	Done() <-chan struct{}
+	Close()
+}
+
 type entry struct {
 	Info
-	session *pty.Session
+	session Terminal
 	source  string // dedup key; empty for plain spawned sessions
 }
 
@@ -45,77 +55,10 @@ func New() *Registry {
 	}
 }
 
-func newID() string {
-	b := make([]byte, 4)
-	rand.Read(b)
-	return hex.EncodeToString(b)
-}
-
-// sourceKey returns a dedup key for well-known multiplexer attach commands.
-// Returns "" for plain sessions (no dedup).
-func sourceKey(cmd string, args []string) string {
-	base := cmd
-	if i := strings.LastIndex(cmd, "/"); i >= 0 {
-		base = cmd[i+1:]
-	}
-	switch base {
-	case "tmux":
-		// tmux attach-session -t [=]<name>
-		if len(args) >= 3 && args[0] == "attach-session" && args[1] == "-t" {
-			return "tmux:" + strings.TrimPrefix(args[2], "=")
-		}
-		// tmux new-session -A -t <target> -s <linked-name>
-		if len(args) > 0 && args[0] == "new-session" {
-			for i, a := range args {
-				if a == "-s" && i+1 < len(args) {
-					return "tmux:" + args[i+1]
-				}
-			}
-		}
-	case "screen":
-		// screen -x <session>
-		if len(args) >= 2 && args[0] == "-x" {
-			return "screen:" + args[1]
-		}
-	}
-	return ""
-}
-
-func (r *Registry) Create(cmd string, args []string, cols, rows uint16) (Info, *pty.Session, error) {
-	src := sourceKey(cmd, args)
-
-	if src != "" {
-		r.mu.RLock()
-		if e, ok := r.liveSourceLocked(src); ok {
-			info, sess := e.Info, e.session
-			r.mu.RUnlock()
-			return info, sess, nil
-		}
-		r.mu.RUnlock()
-	}
-
-	sess, err := pty.New(cmd, args, cols, rows)
-	if err != nil {
-		return Info{}, nil, err
-	}
-	id := newID()
-	info := Info{ID: id, Cmd: cmd, Created: time.Now()}
-
-	r.mu.Lock()
-	r.entries[id] = &entry{Info: info, session: sess, source: src}
-	if src != "" {
-		r.sourceToID[src] = id
-	}
-	r.mu.Unlock()
-	go r.forgetWhenDone(id, sess)
-
-	return info, sess, nil
-}
-
 // alive reports whether a session's PTY is still running. A session is
 // marked done before forgetWhenDone removes it from the maps, so lookups
 // check this instead of trusting map presence.
-func alive(sess *pty.Session) bool {
+func alive(sess Terminal) bool {
 	select {
 	case <-sess.Done():
 		return false
@@ -124,22 +67,10 @@ func alive(sess *pty.Session) bool {
 	}
 }
 
-func (r *Registry) liveSourceLocked(src string) (*entry, bool) {
-	id, ok := r.sourceToID[src]
-	if !ok {
-		return nil, false
-	}
-	e, ok := r.entries[id]
-	if !ok || !alive(e.session) {
-		return nil, false
-	}
-	return e, true
-}
-
 // forgetWhenDone removes id once sess ends, but only while id still refers
 // to sess: a lazy session reactivated under the same id must not lose its
 // new entry to the old session's late cleanup.
-func (r *Registry) forgetWhenDone(id string, sess *pty.Session) {
+func (r *Registry) forgetWhenDone(id string, sess Terminal) {
 	<-sess.Done()
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -155,7 +86,7 @@ func (r *Registry) forgetWhenDone(id string, sess *pty.Session) {
 
 // Get returns a running session. A session whose PTY has ended is reported
 // as missing even before its cleanup runs.
-func (r *Registry) Get(id string) (*pty.Session, bool) {
+func (r *Registry) Get(id string) (Terminal, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	e, ok := r.entries[id]
@@ -186,39 +117,19 @@ func (r *Registry) Snapshot(id string) []byte {
 	return e.session.Snapshot()
 }
 
-// CreateWithID creates a PTY session using a caller-supplied ID.
-func (r *Registry) CreateWithID(id, cmd string, args []string, cols, rows uint16) (Info, *pty.Session, error) {
-	src := sourceKey(cmd, args)
-
-	if src != "" {
-		r.mu.Lock()
-		if e, ok := r.liveSourceLocked(src); ok {
-			info, sess := e.Info, e.session
-			// Register the requested id as an alias so reg.Get(id) succeeds
-			// for startForwarder — without this, the forwarder never starts.
-			r.entries[id] = &entry{Info: Info{ID: id, Cmd: info.Cmd, Created: info.Created}, session: sess}
-			r.mu.Unlock()
-			go r.forgetWhenDone(id, sess)
-			return info, sess, nil
-		}
-		r.mu.Unlock()
-	}
-
-	sess, err := pty.New(cmd, args, cols, rows)
-	if err != nil {
-		return Info{}, nil, err
-	}
+// Add registers an already running terminal under id. An existing entry with
+// the same id is replaced (and closed).
+func (r *Registry) Add(id, cmd string, term Terminal) Info {
 	info := Info{ID: id, Cmd: cmd, Created: time.Now()}
-
 	r.mu.Lock()
-	r.entries[id] = &entry{Info: info, session: sess, source: src}
-	if src != "" {
-		r.sourceToID[src] = id
-	}
+	old, existed := r.entries[id]
+	r.entries[id] = &entry{Info: info, session: term}
 	r.mu.Unlock()
-	go r.forgetWhenDone(id, sess)
-
-	return info, sess, nil
+	if existed && old.session != term {
+		old.session.Close()
+	}
+	go r.forgetWhenDone(id, term)
+	return info
 }
 
 func (r *Registry) Remove(id string) {

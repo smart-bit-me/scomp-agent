@@ -76,3 +76,11 @@ func (b *Buffer) Snapshot() []byte {
 	copy(out[n:], b.buf[:b.head])
 	return out
 }
+
+// Reset discards all buffered data.
+func (b *Buffer) Reset() {
+	b.mu.Lock()
+	b.head = 0
+	b.full = false
+	b.mu.Unlock()
+}

@@ -20,6 +20,8 @@ make build-all      # 4 cross-compile targets → bin/scomp-{linux,darwin}-{amd6
 make test           # go test ./...
 make test-race      # race detector
 make lint           # golangci-lint run ./...
+make build-fakeshell   # -tags fakeshellonly → bin/scomp-fakeshell (no PTY code)
+make verify-fakeshell  # proves that build has no process-spawning code (CI runs it)
 ```
 
 Always run `gofmt -w` on touched files and `make test` before committing.
@@ -31,8 +33,12 @@ Always run `gofmt -w` on touched files and `make test` before committing.
 | `cmd/scomp/` | entrypoint; server/mode/QR/version flags; pairing prompt |
 | `cmd/scomp/session_*` | stable multiplexer catalog, fsnotify, tmux control-mode events |
 | `protocol/` | wire types SHARED with scomp-server (`AgentMsg`, `ServerMsg`, `SessionInfo`) |
-| `internal/pty/` | PTY session, 1 MiB ring buffer, DECCKM tracking |
-| `internal/sessions/` | session registry, dedup by source key |
+| `internal/stream/` | ring buffer + broadcast + ordered snapshots (PTY and fake sessions) |
+| `internal/pty/` | PTY session, DECCKM tracking |
+| `internal/sessions/` | session registry of `Terminal`s, dedup by source key; PTY spawning in `spawn.go` |
+| `cmd/scomp/multiplexer*.go` | tmux/Screen source (`!fakeshellonly`) and its stub (`fakeshellonly`) |
+| `cmd/scomp/fakeshell_source.go` | fixed catalog for `--mode fakeshell` |
+| `fakeshell/` | simulated shell/agent/logs programs, `vfs/` in-memory tree, `term/` keys + line editor |
 | `internal/tmuxsess/` `internal/screensess/` | tmux / screen discovery |
 | `internal/auth/` | persistent UID + Ed25519 key under `~/.config/scomp/` |
 
@@ -60,9 +66,20 @@ Always run `gofmt -w` on touched files and `make test` before committing.
   events; tmux uses a read-only `ignore-size` control client. Do not replace
   either with a periodic scan timer.
 
+- **Fake shell mode must stay unable to touch the system** (`docs/FAKESHELL.md`).
+  Nothing under `fakeshell/` may import `os`, `os/exec`, `net`, `syscall`,
+  `unsafe` or `plugin` (`fakeshell/safety_test.go`). Code that spawns processes
+  or attaches PTYs must live in files tagged `//go:build !fakeshellonly`;
+  `scripts/verify-fakeshell.sh` fails otherwise. New fake commands go in the
+  command table in `fakeshell/commands.go`; the banner and `help` list them
+  automatically. Never put `.go` or `go.mod` files in `fakeshell/honeyfs/`.
+- **Run tests in both builds**: `make test` runs `go test` with and without
+  `-tags fakeshellonly`.
+
 ## Release
 
-Tags `vX.Y.Z` drive GitHub Actions (`release.yml`): it builds the four binaries,
+Tags `vX.Y.Z` drive GitHub Actions (`release.yml`): it builds the four binaries
+plus `scomp-fakeshell-linux-{amd64,arm64}`,
 attests provenance, and publishes them to a GitHub Release. The workflow is gated
 on the `production` environment and uses SHA-pinned actions.
 

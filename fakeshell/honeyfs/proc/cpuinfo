@@ -1,0 +1,13 @@
+processor	: 0
+vendor_id	: GenuineIntel
+model name	: Intel(R) Xeon(R) Silver 4314 CPU @ 2.40GHz
+cpu MHz		: 2400.000
+cache size	: 24576 KB
+cpu cores	: 2
+
+processor	: 1
+vendor_id	: GenuineIntel
+model name	: Intel(R) Xeon(R) Silver 4314 CPU @ 2.40GHz
+cpu MHz		: 2400.000
+cache size	: 24576 KB
+cpu cores	: 2

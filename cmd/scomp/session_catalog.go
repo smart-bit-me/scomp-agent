@@ -1,3 +1,5 @@
+//go:build !fakeshellonly
+
 package main
 
 import (
@@ -11,11 +13,6 @@ import (
 	"github.com/smart-bit-me/scomp-agent/internal/sessions"
 	"github.com/smart-bit-me/scomp-agent/internal/tmuxsess"
 )
-
-type sessionChange struct {
-	add      *lazySession
-	removeID string
-}
 
 // sessionCatalog keeps stable IDs for discovered multiplexer sessions and
 // publishes lifecycle changes to the currently connected relay client.

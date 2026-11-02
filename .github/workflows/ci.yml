@@ -23,6 +23,12 @@ jobs:
       - name: test-race
         run: go test -race ./...
 
+      - name: test-race (fakeshellonly)
+        run: go test -race -tags fakeshellonly ./...
+
+      - name: verify fakeshellonly build spawns nothing
+        run: scripts/verify-fakeshell.sh
+
       - name: coverage
         run: go test -coverprofile=coverage.out ./...
 
@@ -30,6 +36,7 @@ jobs:
         run: |
           go install honnef.co/go/tools/cmd/staticcheck@v0.8.2
           staticcheck ./...
+          staticcheck -tags fakeshellonly ./...
 
       - name: cross-compile
         run: |

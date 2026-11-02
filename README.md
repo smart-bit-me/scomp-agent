@@ -16,6 +16,8 @@ tmux and screen discovery work on both platforms.
 ```bash
 make build          # native binary → bin/scomp
 make build-all      # all 4 cross-compile targets → bin/scomp-{linux,darwin}-{amd64,arm64}
+make build-fakeshell   # demo-only build, no PTY/tmux/Screen code → bin/scomp-fakeshell
+make verify-fakeshell  # prove that build cannot start processes
 ```
 
 ## Run
@@ -37,7 +39,8 @@ Useful flags:
 | Flag | Default | Description |
 |---|---|---|
 | `--server` | `wss://link.scomp.me/agent` | Relay WebSocket URL |
-| `--mode` | `readonly` | Input policy: `full`, `readonly`, or `approved-only` |
+| `--mode` | `readonly` | Input policy: `full`, `readonly`, or `approved-only`; or `fakeshell` (see below) |
+| `--hostname` | OS hostname | Name shown in the apps (`review-host` in fakeshell mode) |
 | `--no-qr` | false | Print the URL without rendering a terminal QR code |
 | `--version` | — | Print the build version and exit |
 
@@ -52,6 +55,24 @@ type. Select `--mode full` deliberately to let an authorized remote client type
 arbitrary input into the PTY, or `--mode approved-only` to accept only Enter,
 Tab, Escape, Ctrl+C, and `y`/`n` confirmation sequences. Unknown mode values are
 rejected instead of falling back to full control.
+
+## Fake shell mode (demo / app review host)
+
+```bash
+make build-fakeshell
+./bin/scomp-fakeshell            # same as: scomp --mode fakeshell
+```
+
+Instead of tmux and Screen, the agent offers three simulated sessions:
+`shell` (a pretend bash with `ls`, `cat`, `ps`, `top`, live `date`, `git`,
+`build`, …), `agent` (a pretend coding agent asking `y/n`) and `logs` (a
+scrolling log). Everything a client types is interpreted in Go; nothing is ever
+executed, opened or sent to the operating system, so the host can run anywhere
+and as any user. The `fakeshellonly` build does not even link the PTY code, which
+`make verify-fakeshell` (run in CI) proves. Fake mode keeps a separate identity
+under `~/.config/scomp/fakeshell/` and announces itself as `review-host`.
+Design and safety argument: [`docs/FAKESHELL.md`](docs/FAKESHELL.md); the
+systemd unit for the always-on review host is in [`demo/`](demo/).
 
 ## Identity and pairing
 
@@ -73,7 +94,7 @@ show update guidance. Development builds report their Git-derived build version.
 ## Test
 
 ```bash
-make test           # go test ./...
+make test           # go test ./... in both the regular and fakeshellonly builds
 make test-race      # race detector
 make test-cover     # coverage report → coverage.html
 ```
@@ -83,8 +104,10 @@ make test-cover     # coverage report → coverage.html
 | Package | Description |
 |---|---|
 | `protocol/` | Wire types shared with scomp-server (`AgentMsg`, `ServerMsg`, `SessionInfo`) |
-| `internal/pty/` | PTY session + 1 MiB ring buffer + DECCKM tracking |
-| `internal/sessions/` | Session registry with dedup by source key |
+| `internal/stream/` | Ring buffer + broadcast + ordered snapshots, shared by PTY and fake sessions |
+| `internal/pty/` | PTY session + DECCKM tracking |
+| `internal/sessions/` | Session registry (`Terminal` interface) with dedup by source key |
+| `fakeshell/` | Simulated sessions for `--mode fakeshell`: shell, in-memory file tree (`vfs/`), key decoder and line editor (`term/`) |
 | `internal/tmuxsess/` | tmux session discovery (linked sessions for isolation) |
 | `internal/screensess/` | screen session discovery |
 | `internal/auth/uid.go` | Persistent UID at `~/.config/scomp/uid` |

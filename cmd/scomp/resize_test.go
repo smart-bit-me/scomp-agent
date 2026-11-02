@@ -1,3 +1,5 @@
+//go:build !fakeshellonly
+
 package main
 
 import (

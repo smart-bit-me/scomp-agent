@@ -1,35 +1,33 @@
 # scomp-demo.service — an always-on demo host for App Store / Google Play review.
 #
-# It runs the real scomp agent next to three tmux sessions that only run
-# scripted programs. Nothing a reviewer types is executed:
-#   demo   - a pretend shell with canned answers
-#   agent  - a pretend AI coding agent asking "Apply this change? (y/n)"
-#   logs   - a scrolling deploy log
-# tmux runs with no prefix and no key bindings, so a reviewer cannot open a
-# real shell window. systemd runs everything as a throwaway user in a sandbox,
-# restarts it on failure, and resets it daily (RuntimeMaxSec).
+# It runs the fakeshellonly agent build (`make build-fakeshell`, or the
+# scomp-fakeshell-linux-* release asset). That binary offers three simulated
+# sessions — shell, agent, logs — and links no PTY, tmux or Screen code, so
+# nothing a reviewer types can execute anything (see docs/FAKESHELL.md).
+# No tmux, bash or other package is needed on the host.
 #
-# Install (Fedora):
-#   sudo dnf install tmux
-#   sudo install -m 0755 scomp /usr/local/bin/scomp && sudo restorecon -v /usr/local/bin/scomp
-#   sudo cp scomp-demo.service /etc/systemd/system/ && sudo systemctl daemon-reload
+# The sandbox below is defence in depth for the agent's own network code:
+# a throwaway user, a read-only system, no new executables, and daily resets
+# (RuntimeMaxSec).
+#
+# Install:
+#   sudo install -m 0755 bin/scomp-fakeshell /usr/local/bin/scomp-fakeshell
+#   sudo restorecon -v /usr/local/bin/scomp-fakeshell     # SELinux hosts
+#   sudo cp demo/scomp-demo.service /etc/systemd/system/ && sudo systemctl daemon-reload
 #
 # Pair once with the review account (the agent asks for the PIN on stdin):
 #   sudo systemd-run --pty --wait -p DynamicUser=yes -p User=scomp-demo \
-#     -p StateDirectory=scomp-demo -p ProtectHostname=private:review-host \
-#     -E HOME=/var/lib/scomp-demo /usr/local/bin/scomp --mode full
+#     -p StateDirectory=scomp-demo -E HOME=/var/lib/scomp-demo \
+#     /usr/local/bin/scomp-fakeshell
 #   In the app, signed in as the review account: Pair -> enter the printed UID,
 #   then type the PIN into this terminal. Press Ctrl-C once it is paired.
+#   The identity is stored under /var/lib/scomp-demo/.config/scomp/fakeshell/.
 #
 # Run:   sudo systemctl enable --now scomp-demo
 # Logs:  journalctl -u scomp-demo -f
-# Peek:  sudo systemd-run --pty -p DynamicUser=yes -p User=scomp-demo \
-#          -p JoinsNamespaceOf=scomp-demo.service -p PrivateTmp=yes tmux ls
-#
-# Inline scripts: systemd turns "$$" into "$" and "%%" into "%".
 
 [Unit]
-Description=Scomp demo host for app review
+Description=Scomp demo host for app review (simulated sessions only)
 Wants=network-online.target
 After=network-online.target
 
@@ -40,56 +38,9 @@ User=scomp-demo
 StateDirectory=scomp-demo
 Environment=HOME=%S/scomp-demo
 WorkingDirectory=%S/scomp-demo
-# The hostname the app shows for this machine (needs systemd 258 or newer).
-ProtectHostname=private:review-host
 
-# tmux server: no config file, no prefix, no bindings, no status bar.
-ExecStartPre=/usr/bin/tmux -f /dev/null \
-  new-session -d -s demo -x 100 -y 30 /bin/bash -c ' \
-    trap "" INT TSTP QUIT; \
-    echo "Scomp demo machine. This is a simulated shell: nothing you type is executed."; \
-    echo "Try: help, ls, cat README.md, build, date, clear"; \
-    while :; do \
-      read -r -p "review@review-host:~$$ " c || { echo; continue; }; \
-      case "$$c" in \
-        "") ;; \
-        help) echo "help  ls  cat README.md  build  date  clear" ;; \
-        ls) echo "README.md  app/  build.log  deploy.sh" ;; \
-        "cat README.md") echo "# demo app"; echo "Started from tmux, watched and driven from Scomp." ;; \
-        build) for i in 1 2 3 4 5; do echo "[$$i/5] compiling module $$i"; sleep 1; done; echo "BUILD SUCCESSFUL" ;; \
-        date) date ;; \
-        clear) clear ;; \
-        *) echo "demo: $$c: simulated shell, command not run" ;; \
-      esac; \
-    done' \
-  \; set -g prefix None \; set -g prefix2 None \; unbind -a \; unbind -a -T root \; unbind -a -T copy-mode \; unbind -a -T copy-mode-vi \
-  \; set -g status off \; set -g mouse off \; set -g default-terminal screen-256color
-
-ExecStartPre=/usr/bin/tmux new-session -d -s agent -x 100 -y 30 /bin/bash -c ' \
-    trap "" INT TSTP QUIT; n=1; \
-    while :; do \
-      echo; echo "agent> Task $$n: update the dependency lockfile"; \
-      echo "  ~ go.sum  (+3 -1)"; \
-      read -r -p "Apply this change? (y/n) " a || { sleep 1; continue; }; \
-      case "$$a" in \
-        y|Y|yes) echo "applied." ;; \
-        n|N|no) echo "skipped." ;; \
-        *) echo "please answer y or n"; continue ;; \
-      esac; \
-      n=$$((n + 1)); sleep 2; \
-    done'
-
-ExecStartPre=/usr/bin/tmux new-session -d -s logs -x 100 -y 30 /bin/bash -c ' \
-    trap "" INT TSTP QUIT; \
-    while :; do \
-      echo "$$(date -u +%%T) deploy: health check ok (3/3 replicas)"; sleep 3; \
-      echo "$$(date -u +%%T) deploy: request p95 42ms, errors 0"; sleep 3; \
-    done'
-
-ExecStart=/usr/local/bin/scomp --mode full --no-qr
-# Stopping kills the whole cgroup, including the tmux server, so every
-# (re)start begins with fresh sessions.
-KillMode=control-group
+# --hostname defaults to review-host in fakeshell mode.
+ExecStart=/usr/local/bin/scomp-fakeshell --no-qr
 Restart=always
 RestartSec=5
 RuntimeMaxSec=1d
@@ -98,6 +49,9 @@ RuntimeMaxSec=1d
 NoNewPrivileges=yes
 CapabilityBoundingSet=
 AmbientCapabilities=
+# Nothing but the agent itself may be executed.
+NoExecPaths=/
+ExecPaths=/usr/local/bin/scomp-fakeshell
 PrivateTmp=yes
 PrivateDevices=yes
 ProtectSystem=strict
@@ -107,6 +61,7 @@ ProtectKernelModules=yes
 ProtectKernelLogs=yes
 ProtectControlGroups=yes
 ProtectClock=yes
+ProtectHostname=yes
 ProtectProc=invisible
 ProcSubset=pid
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
@@ -118,9 +73,9 @@ MemoryDenyWriteExecute=yes
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
 UMask=0077
-MemoryMax=256M
-TasksMax=64
-CPUQuota=50%
+MemoryMax=128M
+TasksMax=32
+CPUQuota=25%
 
 [Install]
 WantedBy=multi-user.target

@@ -1,0 +1,6 @@
+[1/5] resolving modules
+[2/5] compiling internal/store
+[3/5] compiling internal/api
+[4/5] compiling cmd/demo-app
+[5/5] linking bin/demo-app
+BUILD SUCCESSFUL in 4.8s

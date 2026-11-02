@@ -1,7 +1,7 @@
 BINARY  := scomp
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 
-.PHONY: build build-all run test test-race test-cover lint clean
+.PHONY: build build-all build-fakeshell verify-fakeshell run test test-race test-cover lint clean
 
 build:
 	go build -trimpath -ldflags="-s -w -X main.version=$(VERSION)" -o bin/$(BINARY) ./cmd/scomp
@@ -12,11 +12,20 @@ build-all:
 	CGO_ENABLED=0 GOOS=darwin GOARCH=amd64  go build -trimpath -ldflags="-s -w" -o bin/$(BINARY)-darwin-amd64  ./cmd/scomp
 	CGO_ENABLED=0 GOOS=darwin GOARCH=arm64  go build -trimpath -ldflags="-s -w" -o bin/$(BINARY)-darwin-arm64  ./cmd/scomp
 
+# The hosted review instance: --mode fakeshell only, no PTY/tmux/Screen code
+# linked (see docs/FAKESHELL.md). verify-fakeshell proves it.
+build-fakeshell:
+	go build -trimpath -tags fakeshellonly -ldflags="-s -w -X main.version=$(VERSION)" -o bin/$(BINARY)-fakeshell ./cmd/scomp
+
+verify-fakeshell:
+	scripts/verify-fakeshell.sh
+
 run:
 	go run ./cmd/scomp --server wss://link.scomp.me/agent
 
 test:
 	go test ./...
+	go test -tags fakeshellonly ./...
 
 test-race:
 	go test -race ./...

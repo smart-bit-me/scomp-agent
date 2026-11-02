@@ -24,6 +24,15 @@ scomp --mode full
 sequences (Enter, Tab, Escape, Ctrl+C, and `y`/`n`). The mode is enforced by the
 agent, not by the relay. Read-only sessions also ignore remote resize requests.
 
+`--mode fakeshell` attaches no real session at all: remote input goes to
+simulated programs written in Go that never execute commands, open files or
+open sockets (`fakeshell/` may not import `os`, `os/exec`, `net`, `syscall`,
+`unsafe` or `plugin`; a test enforces it). The `fakeshellonly` build excludes
+the PTY, tmux and Screen code entirely, and `scripts/verify-fakeshell.sh`
+checks the built binary for process-start functions. The agent's own relay
+connection and identity files remain its attack surface, as in every mode, so
+run a public demo host under a sandbox such as `demo/scomp-demo.service`.
+
 ## Protecting local identity
 
 - Keep `~/.config/scomp/uid` and `~/.config/scomp/key` private and backed up when
