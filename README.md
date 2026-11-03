@@ -11,6 +11,26 @@ The agent binary that runs on a developer's machine. It discovers active termina
 
 tmux and screen discovery work on both platforms.
 
+## Install
+
+### Homebrew (macOS and Linux)
+
+```bash
+brew tap smart-bit-me/scomp
+brew trust smart-bit-me/scomp   # Homebrew 7+ only loads third-party taps you trust
+brew install scomp
+```
+
+Upgrade with `brew upgrade scomp`. The formula lives in
+[smart-bit-me/homebrew-scomp](https://github.com/smart-bit-me/homebrew-scomp), which also ships
+[`scomp-mcp`](https://github.com/smart-bit-me/scomp-mcp) (`brew install scomp-mcp`).
+
+### Prebuilt binary
+
+Checksum-verified binaries for Linux and macOS (amd64 and arm64) are attached to every
+[release](https://github.com/smart-bit-me/scomp-agent/releases/latest). The install command
+for your platform is on [scomp.me](https://scomp.me/#snippet).
+
 ## Build
 
 ```bash
